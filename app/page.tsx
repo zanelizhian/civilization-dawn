@@ -6,6 +6,7 @@ import type { CSSProperties } from "react";
 type Terrain = "water" | "desert" | "forest" | "hills" | "grass" | "mountain";
 type Position = { col: number; row: number };
 type TechId = "husbandry" | "riding" | "federalism" | "broadcast";
+type ImprovementType = "palace" | "ranch" | "farm";
 
 type GameState = {
   turn: number;
@@ -55,6 +56,12 @@ const TERRAIN_INFO: Record<Terrain, { label: string; food: number; production: n
   mountain: { label: "山脉", food: 0, production: 1, science: 2, culture: 0, gold: 0 },
 };
 
+const IMPROVEMENTS: Record<string, { type: ImprovementType; name: string; bonus: { food?: number; production?: number; science?: number; culture?: number } }> = {
+  "4-2": { type: "palace", name: "首都宫殿", bonus: { production: 1, science: 1, culture: 1 } },
+  "3-1": { type: "ranch", name: "潘帕斯牧场", bonus: { food: 1, production: 1 } },
+  "2-3": { type: "farm", name: "灌溉农场", bonus: { food: 2 } },
+};
+
 const TECHS: Array<{ id: TechId; name: string; cost: number; icon: string; effect: string }> = [
   { id: "husbandry", name: "畜牧业", cost: 12, icon: "♞", effect: "潘帕斯地块食物 +1" },
   { id: "riding", name: "骑术传统", cost: 16, icon: "⚑", effect: "高乔侦骑移动力 +1" },
@@ -73,16 +80,38 @@ function neighbors(pos: Position) {
   return offsets.map(([dc, dr]) => ({ col: pos.col + dc, row: pos.row + dr })).filter(inBounds);
 }
 
-function areAdjacent(a: Position, b: Position) {
-  return neighbors(a).some((pos) => pos.col === b.col && pos.row === b.row);
-}
-
 function isArgentineTerritory({ col, row }: Position) {
   return (col >= 2 && col <= 5 && row >= 1 && row <= 4) || (col === 6 && row === 3);
 }
 
 function isBrazilianTerritory({ col, row }: Position) {
   return col >= 7 && row <= 2;
+}
+
+function movementRange(start: Position, remainingMoves: number, enemyIds: ReadonlySet<string>) {
+  const reachable = new Map<string, number>();
+  const budget = Math.max(0, Math.floor(remainingMoves));
+  if (!inBounds(start) || budget === 0) return reachable;
+
+  const visited = new Map<string, number>([[idFor(start), 0]]);
+  const queue: Position[] = [start];
+  for (let head = 0; head < queue.length; head += 1) {
+    const current = queue[head];
+    const currentCost = visited.get(idFor(current))!;
+    if (currentCost >= budget) continue;
+    for (const next of neighbors(current)) {
+      const nextId = idFor(next);
+      const terrain = terrainAt(next);
+      const blocked = terrain === "water" || terrain === "mountain" || enemyIds.has(nextId);
+      if (blocked || visited.has(nextId)) continue;
+      const nextCost = currentCost + 1;
+      if (nextCost > budget) continue;
+      visited.set(nextId, nextCost);
+      reachable.set(nextId, nextCost);
+      queue.push(next);
+    }
+  }
+  return reachable;
 }
 
 function reveal(discovered: Set<string>, center: Position, radius = 1) {
@@ -128,7 +157,7 @@ function createInitialState(): GameState {
     messiRecruited: false,
     messiAbilityUsed: false,
     footballTurns: 0,
-    message: "阿根廷的曙光从潘帕斯升起。选择相邻地块开始探索。",
+    message: "阿根廷的曙光从潘帕斯升起。选择绿色落点开始探索。",
     log: ["高乔侦骑在布宜诺斯艾利斯整装待发。"],
     result: null,
   };
@@ -155,22 +184,29 @@ export default function Home() {
     ? { col: Number(game.selectedTile.split("-")[0]), row: Number(game.selectedTile.split("-")[1]) }
     : game.unitPos;
   const selectedTerrain = terrainAt(selectedPos);
+  const selectedImprovement = IMPROVEMENTS[idFor(selectedPos)] ?? null;
   const yieldsFor = (pos: Position) => {
     const terrain = terrainAt(pos);
     const base = TERRAIN_INFO[terrain];
+    const improvement = IMPROVEMENTS[idFor(pos)];
     const owned = isArgentineTerritory(pos);
     const footballBonus = game.footballTurns > 0 && owned ? 1 : 0;
     const husbandryBonus = owned && terrain === "grass" && game.completedTechs.includes("husbandry") ? 1 : 0;
     const argentinaCulture = owned && terrain === "grass" ? 1 : 0;
     return {
       ...base,
-      food: base.food + footballBonus + husbandryBonus,
-      science: base.science + footballBonus,
-      culture: base.culture + argentinaCulture,
+      food: base.food + footballBonus + husbandryBonus + (improvement?.bonus.food ?? 0),
+      production: base.production + (improvement?.bonus.production ?? 0),
+      science: base.science + footballBonus + (improvement?.bonus.science ?? 0),
+      culture: base.culture + argentinaCulture + (improvement?.bonus.culture ?? 0),
     };
   };
   const selectedYield = yieldsFor(selectedPos);
   const maxMoves = 2 + (game.completedTechs.includes("riding") ? 1 : 0) + (game.footballTurns > 0 ? 1 : 0);
+  const movementCosts = useMemo(() => {
+    if (!game.selectedUnit || game.unitMoves <= 0) return new Map<string, number>();
+    return movementRange(game.unitPos, game.unitMoves, new Set([idFor(game.brazilPos)]));
+  }, [game.selectedUnit, game.unitMoves, game.unitPos.col, game.unitPos.row, game.brazilPos.col, game.brazilPos.row]);
   const revealedCount = game.discovered.size;
   const objectives = [
     { label: "首都达到 5 人口", value: game.population, target: 5, done: game.population >= 5 },
@@ -187,17 +223,19 @@ export default function Home() {
       const tileId = idFor(pos);
       const terrain = terrainAt(pos);
       const blocked = terrain === "water" || terrain === "mountain" || tileId === idFor(prev.brazilPos);
-      if (prev.selectedUnit && prev.unitMoves > 0 && areAdjacent(prev.unitPos, pos) && !blocked) {
+      const moveCosts = movementRange(prev.unitPos, prev.unitMoves, new Set([idFor(prev.brazilPos)]));
+      const moveCost = moveCosts.get(tileId);
+      if (prev.selectedUnit && moveCost !== undefined && !blocked) {
         const discovered = reveal(prev.discovered, pos, 1);
         const found = discovered.size - prev.discovered.size;
         const points = Math.min(2, found);
         const entry = found > 0
           ? `高乔侦骑发现了 ${found} 个新地块，获得 ${points} 伟人点。`
-          : `高乔侦骑移动到${TERRAIN_INFO[terrain].label}。`;
+          : `高乔侦骑移动 ${moveCost} 格，到达${TERRAIN_INFO[terrain].label}。`;
         return {
           ...prev,
           unitPos: pos,
-          unitMoves: prev.unitMoves - 1,
+          unitMoves: prev.unitMoves - moveCost,
           greatPoints: prev.greatPoints + points,
           discovered,
           selectedTile: tileId,
@@ -362,7 +400,10 @@ export default function Home() {
 
   const techPercent = activeTech ? Math.min(100, (game.techProgress / activeTech.cost) * 100) : 0;
   const cityGrowthTarget = 10 + game.population * 4;
-  const cityStyle = { left: CITY_POS.col * 70 - 32, top: CITY_POS.row * 82 + (CITY_POS.col % 2) * 41 + 20 };
+  const cityTileLeft = CITY_POS.col * 70;
+  const cityTileTop = CITY_POS.row * 82 + (CITY_POS.col % 2) * 41;
+  const cityStyle = { left: cityTileLeft - 39, top: cityTileTop + 57 };
+  const messiStyle = { left: cityTileLeft + 67, top: cityTileTop + 18 };
   const unitStyle = { left: game.unitPos.col * 70 + 22, top: game.unitPos.row * 82 + (game.unitPos.col % 2) * 41 + 15 };
   const brazilStyle = { left: game.brazilPos.col * 70 + 22, top: game.brazilPos.row * 82 + (game.brazilPos.col % 2) * 41 + 15 };
 
@@ -416,8 +457,13 @@ export default function Home() {
             ))}
           </section>
 
-          <section className="paper-card legend-card">
-            <div className="card-kicker">{selectedYield.label}收益</div>
+          <section className="paper-card legend-card selection-card">
+            <div className="card-kicker">当前选择</div>
+            <div className="selection-heading">
+              <span className={`selection-swatch ${selectedTerrain}`} aria-hidden="true"><i /></span>
+              <div><h3>{selectedImprovement?.name ?? selectedYield.label}</h3><p>{selectedImprovement ? `${selectedYield.label}上的改良设施` : "未改良地块"}</p></div>
+            </div>
+            <div className="selection-meta"><span>{isArgentineTerritory(selectedPos) ? "阿根廷领土" : isBrazilianTerritory(selectedPos) ? "巴西领土" : "中立地块"}</span><b>{selectedImprovement ? "已建设" : "自然地貌"}</b></div>
             <div><span><i className="yield-dot food">粮</i>食物</span><b>{selectedYield.food}</b></div>
             <div><span><i className="yield-dot production">锤</i>生产</span><b>{selectedYield.production}</b></div>
             <div><span><i className="yield-dot science">科</i>科技</span><b>{selectedYield.science}</b></div>
@@ -440,26 +486,31 @@ export default function Home() {
               const tileId = idFor(pos);
               const info = TERRAIN_INFO[terrain];
               const discovered = game.discovered.has(tileId);
-              const reachable = game.selectedUnit && game.unitMoves > 0 && areAdjacent(game.unitPos, pos) && terrain !== "water" && terrain !== "mountain" && tileId !== idFor(game.brazilPos);
+              const moveCost = movementCosts.get(tileId);
+              const reachable = moveCost !== undefined;
               const selected = game.selectedTile === tileId;
               const owned = isArgentineTerritory(pos);
               const rival = isBrazilianTerritory(pos);
+              const improvement = IMPROVEMENTS[tileId];
               const tileYield = yieldsFor(pos);
               const containsUnit = tileId === idFor(game.unitPos) ? "，高乔侦骑在此" : tileId === idFor(game.brazilPos) ? "，巴西斥候在此" : "";
               const yieldLabel = discovered ? `，粮食 ${tileYield.food}，生产 ${tileYield.production}，科技 ${tileYield.science}，文化 ${tileYield.culture}` : "";
+              const tileName = improvement ? `${improvement.name}，位于${info.label}` : info.label;
               return (
                 <button
                   className={`hex-tile ${terrain} ${owned ? "owned" : ""} ${rival ? "rival" : ""} ${discovered ? "" : "fog"} ${reachable ? "reachable" : ""} ${selected ? "selected" : ""} ${game.footballTurns > 0 && owned ? "football-benefit" : ""}`}
                   key={tileId}
                   style={{ left: col * 70, top: row * 82 + (col % 2) * 41 }}
-                  aria-label={`${discovered ? info.label : "未知"}地块，第 ${row + 1} 行第 ${col + 1} 列${yieldLabel}${containsUnit}${reachable ? "，可以移动" : ""}`}
+                  aria-label={`${discovered ? tileName : "未知"}地块，第 ${row + 1} 行第 ${col + 1} 列${yieldLabel}${containsUnit}${reachable ? `，可以移动，需要 ${moveCost} 点移动力` : ""}`}
                   aria-selected={selected}
                   role="gridcell"
                   data-testid={`tile-${tileId}`}
                   onClick={() => handleTileClick(pos)}
                   disabled={aiThinking || Boolean(game.result)}
                 >
-                  {discovered ? (
+                  {discovered ? improvement ? (
+                    <span className={`improvement-art improvement-${improvement.type}`} aria-hidden="true"><i /><i /><i /><i /><b /></span>
+                  ) : (
                     <span className={`terrain-art art-${terrain}`} aria-hidden="true"><i /><i /><i /><i /></span>
                   ) : (
                     <span className="fog-mark" aria-hidden="true">?</span>
@@ -472,27 +523,28 @@ export default function Home() {
                       {tileYield.culture > 0 && <i className="culture">文<b>{tileYield.culture}</b></i>}
                     </span>
                   )}
+                  {reachable && <span className="move-overlay" aria-hidden="true"><i /><b>{moveCost}</b></span>}
+                  {selected && <span className="selection-overlay" aria-hidden="true"><i /></span>}
                 </button>
               );
             })}
 
-            <button className="map-piece capital-piece" style={cityStyle} aria-label={`布宜诺斯艾利斯，阿根廷首都，${game.population} 人口`} onClick={() => setGame((prev) => ({ ...prev, selectedTile: idFor(CITY_POS), selectedUnit: false, message: "已选择布宜诺斯艾利斯。" }))}>
-              <span className="city-model" aria-hidden="true">♜</span>
+            <button className="map-piece capital-piece" style={cityStyle} aria-label={`布宜诺斯艾利斯，阿根廷首都，${game.population} 人口，建有首都宫殿`} onClick={() => setGame((prev) => ({ ...prev, selectedTile: idFor(CITY_POS), selectedUnit: false, message: "已选择布宜诺斯艾利斯的首都宫殿。" }))}>
               <span className="place-label"><b>★</b> 布宜诺斯艾利斯 <em>{game.population}</em></span>
             </button>
 
-            <button className={`map-piece unit-piece gaucho-piece ${game.selectedUnit ? "piece-selected" : ""}`} style={unitStyle} aria-label={`高乔侦骑，${game.unitMoves} 点移动力`} data-testid="gaucho-unit" onClick={() => setGame((prev) => ({ ...prev, selectedUnit: true, selectedTile: idFor(prev.unitPos), message: "高乔侦骑已选择；绿色虚线地块可以移动。" }))}>
-              <span className="unit-token" aria-hidden="true">♞</span>
+            <button className={`map-piece unit-piece gaucho-piece ${game.selectedUnit ? "piece-selected" : ""}`} style={unitStyle} aria-label={`高乔侦骑，${game.unitMoves} 点移动力`} data-testid="gaucho-unit" onClick={() => setGame((prev) => ({ ...prev, selectedUnit: true, selectedTile: idFor(prev.unitPos), message: "高乔侦骑已选择；绿色落点是本回合可达范围。" }))}>
+              <span className="unit-token" aria-hidden="true"><b>高</b><small>{game.unitMoves}</small></span>
               <span className="unit-label">高乔侦骑</span>
             </button>
 
             <button className="map-piece rival-piece" style={brazilStyle} aria-label="巴西斥候" onClick={() => setGame((prev) => ({ ...prev, selectedUnit: false, selectedTile: idFor(prev.brazilPos), message: "巴西斥候：目前保持中立。" }))}>
-              <span className="unit-token" aria-hidden="true">♟</span>
+              <span className="unit-token" aria-hidden="true"><b>巴</b></span>
               <span className="unit-label">巴西斥候</span>
             </button>
 
             {game.messiRecruited && (
-              <button className="map-piece messi-piece" style={{ left: cityStyle.left + 115, top: cityStyle.top + 22 }} aria-label="伟人莱昂内尔·梅西位于布宜诺斯艾利斯" onClick={activateMessi}>
+              <button className="map-piece messi-piece" style={messiStyle} aria-label="伟人莱昂内尔·梅西位于布宜诺斯艾利斯" onClick={activateMessi}>
                 <span className="messi-map-token"><b>10</b><i>⚽</i></span>
               </button>
             )}
@@ -548,11 +600,11 @@ export default function Home() {
 
       <div className="action-dock" role="region" aria-label="选中单位操作">
         <div className="selected-unit">
-          <span className="unit-portrait" aria-hidden="true">{game.selectedUnit ? "♞" : "⌖"}</span>
-          <div><small>{game.selectedUnit ? "已选择" : "等待命令"}</small><strong>{game.selectedUnit ? "高乔侦骑" : "选择一个单位"}</strong><span>{game.selectedUnit ? `${game.unitMoves} / ${maxMoves} 移动力` : "点击地图上的单位"}</span></div>
+          <span className="unit-portrait" aria-hidden="true">{game.selectedUnit ? "高" : "⌖"}</span>
+          <div className="selected-copy"><small>{game.selectedUnit ? "● 单位已选择" : "等待命令"}</small><strong>{game.selectedUnit ? "高乔侦骑" : "选择一个单位"}</strong>{game.selectedUnit && <span className="movement-pips" aria-label={`${game.unitMoves} / ${maxMoves} 移动力`}>{Array.from({ length: maxMoves }, (_, index) => <i className={index < game.unitMoves ? "available" : "spent"} key={index} />)}<b>{game.unitMoves}/{maxMoves}</b></span>}<span>{game.selectedUnit ? game.unitMoves > 0 ? "选择绿色落点移动" : "本回合移动力已用完" : "点击地图上的单位"}</span></div>
         </div>
         <div className="action-buttons">
-          <button disabled={!game.selectedUnit || game.unitMoves <= 0 || aiThinking} onClick={() => setGame((prev) => ({ ...prev, message: "请选择绿色虚线标出的相邻地块。" }))}><b>⌖</b><span>移动</span></button>
+          <button disabled={!game.selectedUnit || game.unitMoves <= 0 || aiThinking} onClick={() => setGame((prev) => ({ ...prev, message: "请选择带白色落点的绿色地块；数字表示需要的移动力。" }))}><b>⌖</b><span>移动</span></button>
           <button disabled={!game.selectedUnit || game.unitMoves <= 0 || aiThinking} onClick={handleExplore} data-testid="explore-action"><b>◉</b><span>侦察</span></button>
           <button disabled={!game.selectedUnit || game.unitMoves <= 0 || aiThinking} onClick={handleWait}><b>⚑</b><span>驻扎</span></button>
           <button disabled={!game.selectedUnit || game.unitMoves <= 0 || aiThinking} onClick={handleWait}><b>↶</b><span>休整</span></button>
