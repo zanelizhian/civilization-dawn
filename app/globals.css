@@ -2028,8 +2028,11 @@ button { font: inherit; }
   .celebration-card b { margin: 0; padding: 0; }
 }
 
-/* v13: one coherent Civ VII-style growth language */
-.territory-fill.argentina { fill: rgba(74,151,218,.14); }
+/* v16: developed core plus a one-hex political border */
+.territory-fill.argentina.fringe { fill: rgba(74,151,218,.13); }
+.territory-fill.argentina.developed { fill: rgba(42,124,204,.31); }
+.territory-fill.foreign.fringe { opacity: .82; }
+.territory-fill.foreign.developed { opacity: 1; }
 .strategy-tabs { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 .tile-yields { width: 56px; min-height: 28px; top: 47px; gap: 2px; }
 .tile-yields i { min-width: 24px; height: 14px; border-color: rgba(255,255,255,.88); font-size: 8px; box-shadow: 0 2px 4px rgba(23,32,29,.28); }

@@ -5,7 +5,7 @@ import test from "node:test";
 import { build } from "esbuild";
 
 const source = `${readFileSync(new URL("../app/page.tsx", import.meta.url), "utf8")}
-export { createInitialState, makeLocalSave, readLocalSave, deriveRivalEmpires, improvementTypeAt, hexDistance, CITY_POS, RIVALS };`;
+export { createInitialState, makeLocalSave, readLocalSave, deriveRivalEmpires, improvementTypeAt, hexDistance, CITY_POS, RIVALS, COLS, ROWS, territoryFromDeveloped, playerDevelopedTileIds };`;
 const bundled = await build({
   stdin: { contents: source, loader: "tsx", resolveDir: new URL("..", import.meta.url).pathname, sourcefile: "page.logic-test.tsx" },
   bundle: true,
@@ -16,7 +16,22 @@ const bundled = await build({
 });
 const runtimeModule = { exports: {} };
 new Function("require", "module", "exports", bundled.outputFiles[0].text)(createRequire(import.meta.url), runtimeModule, runtimeModule.exports);
-const { createInitialState, makeLocalSave, readLocalSave, deriveRivalEmpires, improvementTypeAt, hexDistance, CITY_POS, RIVALS } = runtimeModule.exports;
+const {
+  createInitialState,
+  makeLocalSave,
+  readLocalSave,
+  deriveRivalEmpires,
+  improvementTypeAt,
+  hexDistance,
+  CITY_POS,
+  RIVALS,
+  COLS,
+  ROWS,
+  territoryFromDeveloped,
+  playerDevelopedTileIds,
+} = runtimeModule.exports;
+
+const idFor = (pos) => `${pos.col}-${pos.row}`;
 
 const posForId = (tileId) => {
   const [col, row] = tileId.split("-").map(Number);
@@ -30,75 +45,144 @@ const adjacentPositions = (pos) => {
   return offsets.map(([dc, dr]) => ({ col: pos.col + dc, row: pos.row + dr }));
 };
 
-test("new games start in one ring and round-trip through save v4", () => {
+const inBounds = (pos) => pos.col >= 0 && pos.col < COLS && pos.row >= 0 && pos.row < ROWS;
+const sorted = (values) => [...values].sort((a, b) => a.localeCompare(b));
+
+const expectedTerritory = (developedTileIds) => {
+  const result = new Set();
+  for (const tileId of developedTileIds) {
+    result.add(tileId);
+    adjacentPositions(posForId(tileId))
+      .filter(inBounds)
+      .forEach((neighbor) => result.add(idFor(neighbor)));
+  }
+  return sorted(result);
+};
+
+const assertConnected = (tileIds, origin, message) => {
+  const tiles = new Set(tileIds);
+  const originId = idFor(origin);
+  assert.ok(tiles.has(originId), `${message}: must contain its capital`);
+  const reached = new Set([originId]);
+  const queue = [origin];
+  while (queue.length) {
+    const current = queue.shift();
+    for (const neighbor of adjacentPositions(current)) {
+      const tileId = idFor(neighbor);
+      if (tiles.has(tileId) && !reached.has(tileId)) {
+        reached.add(tileId);
+        queue.push(neighbor);
+      }
+    }
+  }
+  assert.equal(reached.size, tiles.size, `${message}: tiles must form one connected region`);
+};
+
+test("the enlarged world uses the planned 32 by 18 layout", () => {
+  assert.equal(COLS, 32);
+  assert.equal(ROWS, 18);
+  assert.deepEqual(CITY_POS, { col: 4, row: 4 });
+
+  const expectedCapitals = {
+    brazil: { col: 16, row: 4 },
+    inca: { col: 4, row: 13 },
+    maya: { col: 16, row: 13 },
+    egypt: { col: 27, row: 4 },
+    han: { col: 27, row: 13 },
+  };
+  assert.deepEqual(Object.fromEntries(RIVALS.map((rival) => [rival.id, rival.capital])), expectedCapitals);
+  const allCapitals = [CITY_POS, ...RIVALS.map((rival) => rival.capital)];
+  for (let index = 0; index < allCapitals.length; index += 1) {
+    for (let other = index + 1; other < allCapitals.length; other += 1) {
+      assert.ok(hexDistance(allCapitals[index], allCapitals[other]) >= 9);
+    }
+  }
+});
+
+test("new games start from one developed capital and round-trip through save v5", () => {
   const initial = createInitialState();
+  const capitalId = idFor(CITY_POS);
+  const developed = playerDevelopedTileIds(initial);
+
+  assert.equal(initial.population, 1);
+  assert.deepEqual(initial.ruralTiles, []);
+  assert.deepEqual(sorted(developed), [capitalId]);
+  assert.deepEqual(sorted(initial.ownedTiles), expectedTerritory([capitalId]));
   assert.equal(initial.ownedTiles.length, 7);
-  assert.ok(initial.ownedTiles.every((tileId) => hexDistance(posForId(tileId), CITY_POS) <= 1));
-  assert.deepEqual(initial.ruralTiles, ["3-1", "5-1", "5-2"]);
-  assert.equal(initial.builtImprovements["5-1"], "lumbermill");
+  assert.equal(improvementTypeAt(initial, capitalId), "palace");
+  assert.deepEqual(sorted(territoryFromDeveloped(developed)), expectedTerritory(developed));
 
-  const restored = readLocalSave(JSON.stringify(makeLocalSave(initial)));
+  const save = makeLocalSave(initial);
+  assert.equal(save.version, 5);
+  const restored = readLocalSave(JSON.stringify(save));
   assert.equal(restored.ok, true);
-  assert.equal(restored.ok && improvementTypeAt(restored.game, "5-1"), "lumbermill");
+  assert.ok(restored.ok);
+  assert.equal(restored.game.population, 1);
+  assert.deepEqual(restored.game.ruralTiles, []);
+  assert.deepEqual(sorted(restored.game.ownedTiles), expectedTerritory([capitalId]));
+  assert.ok(restored.game.discovered instanceof Set);
+  assert.equal(improvementTypeAt(restored.game, capitalId), "palace");
+
+  const obsolete = readLocalSave(JSON.stringify({ ...save, version: 4 }));
+  assert.deepEqual(obsolete, { ok: false, reason: "version" });
 });
 
-test("old v4 farms and buildings keep their original tiles", () => {
-  const legacy = createInitialState();
-  legacy.ownedTiles = [...legacy.ownedTiles, "2-3"];
-  legacy.ruralTiles = ["3-1", "2-3", "5-2"];
-  legacy.builtImprovements = {};
-  legacy.buildingPlacements = { granary: "5-1" };
-  legacy.completedBuildings = ["granary"];
-  legacy.productionProgress.granary = 21;
-  legacy.activeProduction = null;
+test("player territory is always the developed core plus one border ring", () => {
+  const state = createInitialState();
+  state.ruralTiles = ["5-4"];
+  state.builtImprovements = { "5-4": "farm" };
+  state.buildingPlacements = { monument: "4-5" };
 
-  const restored = readLocalSave(JSON.stringify(makeLocalSave(legacy)));
-  assert.equal(restored.ok, true);
-  assert.equal(restored.ok && improvementTypeAt(restored.game, "2-3"), "farm");
-  assert.equal(restored.ok && restored.game.buildingPlacements.granary, "5-1");
-  assert.equal(restored.ok && restored.game.ruralTiles.includes("5-1"), false);
-
-  const secondRoundTrip = restored.ok ? readLocalSave(JSON.stringify(makeLocalSave(restored.game))) : restored;
-  assert.equal(secondRoundTrip.ok, true);
+  const developed = playerDevelopedTileIds(state);
+  assert.deepEqual(sorted(developed), sorted([idFor(CITY_POS), "5-4", "4-5"]));
+  assert.deepEqual(sorted(territoryFromDeveloped(developed)), expectedTerritory(developed));
 });
 
-test("AI borders stay deterministic, connected, separate, and gradual", () => {
+test("AI development pushes an exact one-tile border without overlaps", () => {
   const initial = createInitialState();
   let previous = null;
 
   for (let turn = 1; turn <= 70; turn += 1) {
     const empires = deriveRivalEmpires({ turn, ownedTiles: initial.ownedTiles });
     assert.deepEqual(empires, deriveRivalEmpires({ turn, ownedTiles: initial.ownedTiles }));
-    const claimed = new Set(initial.ownedTiles);
+    const globallyClaimed = new Set(initial.ownedTiles);
 
     for (const rival of RIVALS) {
       const empire = empires[rival.id];
-      if (turn === 1) assert.equal(empire.ownedTiles.length, 7);
-      assert.ok(empire.ownedTiles.every((tileId) => !claimed.has(tileId)));
-      empire.ownedTiles.forEach((tileId) => claimed.add(tileId));
-      assert.ok(empire.ownedTiles.every((tileId) => hexDistance(posForId(tileId), rival.capital) <= 3));
-      assert.ok(empire.developedTiles.every((tileId) => empire.ownedTiles.includes(tileId)));
+      const capitalId = idFor(rival.capital);
+      const core = [capitalId, ...empire.developedTiles];
 
-      const owned = new Set(empire.ownedTiles);
-      const capitalId = `${rival.capital.col}-${rival.capital.row}`;
-      const reached = new Set([capitalId]);
-      const queue = [rival.capital];
-      while (queue.length) {
-        const current = queue.shift();
-        for (const neighbor of adjacentPositions(current)) {
-          const tileId = `${neighbor.col}-${neighbor.row}`;
-          if (owned.has(tileId) && !reached.has(tileId)) {
-            reached.add(tileId);
-            queue.push(neighbor);
-          }
-        }
+      assert.equal(new Set(empire.developedTiles).size, empire.developedTiles.length);
+      assert.equal(new Set(empire.ownedTiles).size, empire.ownedTiles.length);
+      assert.equal(empire.development, empire.developedTiles.length);
+      assert.ok(!empire.developedTiles.includes(capitalId));
+      assert.deepEqual(sorted(empire.ownedTiles), expectedTerritory(core));
+      assert.deepEqual(sorted(empire.ownedTiles), sorted(territoryFromDeveloped(core)));
+      assert.ok(empire.developedTiles.every((tileId) => hexDistance(posForId(tileId), rival.capital) <= 3));
+      assert.ok(empire.ownedTiles.every((tileId) => hexDistance(posForId(tileId), rival.capital) <= 4));
+      assertConnected(core, rival.capital, `${rival.id} developed core on turn ${turn}`);
+      assertConnected(empire.ownedTiles, rival.capital, `${rival.id} territory on turn ${turn}`);
+
+      for (const tileId of empire.ownedTiles) {
+        assert.ok(!globallyClaimed.has(tileId), `${rival.id} overlaps another empire at ${tileId} on turn ${turn}`);
+        globallyClaimed.add(tileId);
       }
-      assert.equal(reached.size, owned.size);
+
+      if (turn === 1) {
+        assert.equal(empire.population, 1);
+        assert.equal(empire.development, 0);
+        assert.deepEqual(empire.developedTiles, []);
+        assert.equal(empire.ownedTiles.length, 7);
+      }
 
       if (previous) {
-        const previousTiles = previous[rival.id].ownedTiles;
-        assert.ok(previousTiles.every((tileId) => owned.has(tileId)));
-        assert.ok(empire.ownedTiles.filter((tileId) => !previousTiles.includes(tileId)).length <= 1);
+        const oldEmpire = previous[rival.id];
+        const oldDeveloped = new Set(oldEmpire.developedTiles);
+        const currentDeveloped = new Set(empire.developedTiles);
+        assert.ok(oldEmpire.developedTiles.every((tileId) => currentDeveloped.has(tileId)));
+        assert.ok(empire.developedTiles.filter((tileId) => !oldDeveloped.has(tileId)).length <= 1);
+        assert.ok(oldEmpire.ownedTiles.every((tileId) => empire.ownedTiles.includes(tileId)));
+        assert.ok(empire.population >= oldEmpire.population);
       }
     }
     previous = empires;
