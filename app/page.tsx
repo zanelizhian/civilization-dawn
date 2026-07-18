@@ -7,6 +7,7 @@ type Terrain = "water" | "desert" | "forest" | "hills" | "grass" | "mountain";
 type Position = { col: number; row: number };
 type TechId = "husbandry" | "riding" | "federalism" | "broadcast";
 type ProductionId = "monument" | "granary" | "academy" | "workshop";
+type YieldKey = "food" | "production" | "science" | "culture";
 type ImprovementType = "palace" | "ranch" | "farm";
 
 type GameState = {
@@ -23,6 +24,7 @@ type GameState = {
   activeProduction: ProductionId | null;
   productionProgress: Record<ProductionId, number>;
   completedBuildings: ProductionId[];
+  buildingPlacements: Partial<Record<ProductionId, string>>;
   unitPos: Position;
   unitMoves: number;
   brazilPos: Position;
@@ -73,14 +75,22 @@ const TECHS: Array<{ id: TechId; name: string; cost: number; icon: string; effec
   { id: "broadcast", name: "大众广播", cost: 24, icon: "◉", effect: "每回合伟人点 +2" },
 ];
 
-const PRODUCTIONS: Array<{ id: ProductionId; name: string; cost: number; icon: string; effect: string; category: string }> = [
-  { id: "monument", name: "五月纪念碑", cost: 14, icon: "✦", effect: "每回合文化 +2", category: "城市建筑" },
-  { id: "granary", name: "潘帕斯粮仓", cost: 21, icon: "♨", effect: "每回合食物 +2", category: "城市建筑" },
-  { id: "academy", name: "国立学院", cost: 28, icon: "◆", effect: "每回合科技 +2", category: "城市建筑" },
-  { id: "workshop", name: "布宜诺斯工坊", cost: 32, icon: "⚒", effect: "首都每回合生产力 +2", category: "城市建筑" },
+const PRODUCTIONS: Array<{ id: ProductionId; name: string; cost: number; icon: string; effect: string; category: string; yield: YieldKey; allowedTerrains: Terrain[]; placementRule: string }> = [
+  { id: "monument", name: "五月纪念碑", cost: 14, icon: "✦", effect: "每回合文化 +2", category: "文化建筑", yield: "culture", allowedTerrains: ["grass", "desert", "hills"], placementRule: "建在草原、沙漠或丘陵" },
+  { id: "granary", name: "潘帕斯粮仓", cost: 21, icon: "♨", effect: "每回合食物 +2", category: "农业建筑", yield: "food", allowedTerrains: ["grass", "forest"], placementRule: "建在草原或森林" },
+  { id: "academy", name: "国立学院", cost: 28, icon: "◆", effect: "每回合科技 +2", category: "科技建筑", yield: "science", allowedTerrains: ["grass", "desert", "hills", "forest"], placementRule: "建在陆地；山脉与丘陵提供相邻加成" },
+  { id: "workshop", name: "布宜诺斯工坊", cost: 32, icon: "⚒", effect: "首都每回合生产力 +2", category: "工业建筑", yield: "production", allowedTerrains: ["forest", "hills", "desert"], placementRule: "建在森林、丘陵或沙漠" },
 ];
 
+const YIELD_META: Record<YieldKey, { label: string; symbol: string }> = {
+  food: { label: "食物", symbol: "粮" },
+  production: { label: "生产", symbol: "锤" },
+  science: { label: "科技", symbol: "科" },
+  culture: { label: "文化", symbol: "文" },
+};
+
 const idFor = ({ col, row }: Position) => `${col}-${row}`;
+const posForId = (id: string): Position => ({ col: Number(id.split("-")[0]), row: Number(id.split("-")[1]) });
 const terrainAt = ({ col, row }: Position) => TERRAIN[row * COLS + col];
 const inBounds = ({ col, row }: Position) => col >= 0 && col < COLS && row >= 0 && row < ROWS;
 
@@ -146,6 +156,55 @@ function initialDiscovered() {
   return set;
 }
 
+const CITY_BUILDABLE_IDS = reveal(new Set<string>(), CITY_POS, 2);
+
+function placedProductionAt(state: GameState, tileId: string) {
+  const entry = Object.entries(state.buildingPlacements).find(([, placedTile]) => placedTile === tileId);
+  return (entry?.[0] as ProductionId | undefined) ?? null;
+}
+
+function placementAdjacencyFor(productionId: ProductionId, pos: Position) {
+  const adjacent = neighbors(pos);
+  const count = adjacent.filter((neighbor) => {
+    const terrain = terrainAt(neighbor);
+    if (productionId === "monument") return idFor(neighbor) === idFor(CITY_POS) || terrain === "grass";
+    if (productionId === "granary") return terrain === "grass" || IMPROVEMENTS[idFor(neighbor)]?.type === "farm";
+    if (productionId === "academy") return terrain === "mountain" || terrain === "hills";
+    return terrain === "hills" || terrain === "forest";
+  }).length;
+  return Math.min(3, count);
+}
+
+function completedPlacementBonus(state: GameState, productionId: ProductionId) {
+  const tileId = state.buildingPlacements[productionId];
+  return tileId && state.completedBuildings.includes(productionId)
+    ? placementAdjacencyFor(productionId, posForId(tileId))
+    : 0;
+}
+
+function productionPlacementError(state: GameState, productionId: ProductionId, pos: Position) {
+  const tileId = idFor(pos);
+  const production = PRODUCTIONS.find((item) => item.id === productionId)!;
+  const terrain = terrainAt(pos);
+  if (!state.discovered.has(tileId)) return "尚未探索这块地";
+  if (!isArgentineTerritory(pos)) return "不在布宜诺斯艾利斯领土内";
+  if (!CITY_BUILDABLE_IDS.has(tileId)) return "超出首都两格建设范围";
+  if (tileId === idFor(CITY_POS)) return "首都宫殿已占用这块地";
+  if (terrain === "water" || terrain === "mountain") return `${TERRAIN_INFO[terrain].label}不能建设`;
+  if (IMPROVEMENTS[tileId]) return `${IMPROVEMENTS[tileId].name}已占用这块地`;
+  if (placedProductionAt(state, tileId)) return "已有城市建筑占用这块地";
+  if (tileId === idFor(state.unitPos) || tileId === idFor(state.brazilPos)) return "单位正在占用这块地";
+  if (!production.allowedTerrains.includes(terrain)) return production.placementRule;
+  return null;
+}
+
+function bestAvailableAdjacency(state: GameState, productionId: ProductionId) {
+  return TERRAIN.reduce((best, _, index) => {
+    const pos = { col: index % COLS, row: Math.floor(index / COLS) };
+    return productionPlacementError(state, productionId, pos) ? best : Math.max(best, placementAdjacencyFor(productionId, pos));
+  }, 0);
+}
+
 function tileProductionFor(pos: Position) {
   const terrain = TERRAIN_INFO[terrainAt(pos)];
   const improvement = IMPROVEMENTS[idFor(pos)];
@@ -158,7 +217,7 @@ function cityProductionFor(state: GameState) {
     .map(tileProductionFor)
     .sort((a, b) => b - a);
   const workedTileProduction = workable.slice(0, Math.max(1, state.population)).reduce((total, value) => total + value, 0);
-  return Math.max(1, workedTileProduction) + (state.completedBuildings.includes("workshop") ? 2 : 0);
+  return Math.max(1, workedTileProduction) + (state.completedBuildings.includes("workshop") ? 2 + completedPlacementBonus(state, "workshop") : 0);
 }
 
 function createInitialState(): GameState {
@@ -176,6 +235,7 @@ function createInitialState(): GameState {
     activeProduction: null,
     productionProgress: { monument: 0, granary: 0, academy: 0, workshop: 0 },
     completedBuildings: [],
+    buildingPlacements: {},
     unitPos: { col: 6, row: 3 },
     unitMoves: 2,
     brazilPos: { col: 7, row: 1 },
@@ -203,7 +263,11 @@ function nextBrazilPosition(state: GameState) {
 export default function Home() {
   const [game, setGame] = useState<GameState>(createInitialState);
   const [techPickerOpen, setTechPickerOpen] = useState(false);
-  const [productionPickerOpen, setProductionPickerOpen] = useState(false);
+  const [productionDrawerOpen, setProductionDrawerOpen] = useState(false);
+  const [placingProduction, setPlacingProduction] = useState<ProductionId | null>(null);
+  const [placementCandidate, setPlacementCandidate] = useState<string | null>(null);
+  const [hoveredPlacementTile, setHoveredPlacementTile] = useState<string | null>(null);
+  const [placementDetailed, setPlacementDetailed] = useState(false);
   const [productionReminderBypassed, setProductionReminderBypassed] = useState(false);
   const [aiThinking, setAiThinking] = useState(false);
   const [showYields, setShowYields] = useState(false);
@@ -219,33 +283,73 @@ export default function Home() {
     : null;
   const hasAvailableProduction = game.completedBuildings.length < PRODUCTIONS.length;
   const citySelected = !game.selectedUnit && game.selectedTile === idFor(CITY_POS);
+  const placingItem = PRODUCTIONS.find((item) => item.id === placingProduction) ?? null;
+  const placedProductionByTile = useMemo(() => {
+    const map = new Map<string, ProductionId>();
+    Object.entries(game.buildingPlacements).forEach(([productionId, tileId]) => {
+      if (tileId) map.set(tileId, productionId as ProductionId);
+    });
+    return map;
+  }, [game.buildingPlacements]);
+  const placementOptions = useMemo(() => {
+    const map = new Map<string, { error: string | null; adjacency: number }>();
+    if (!placingProduction) return map;
+    TERRAIN.forEach((_, index) => {
+      const pos = { col: index % COLS, row: Math.floor(index / COLS) };
+      const tileId = idFor(pos);
+      map.set(tileId, {
+        error: productionPlacementError(game, placingProduction, pos),
+        adjacency: placementAdjacencyFor(placingProduction, pos),
+      });
+    });
+    return map;
+  }, [game, placingProduction]);
+  const bestPlacementAdjacency = placingProduction
+    ? Math.max(0, ...Array.from(placementOptions.values()).filter((option) => !option.error).map((option) => option.adjacency))
+    : 0;
+  const placementPreviewTile = placementCandidate ?? hoveredPlacementTile;
+  const placementPreviewOption = placementPreviewTile ? placementOptions.get(placementPreviewTile) ?? null : null;
+  const placementPreviewPos = placementPreviewTile ? posForId(placementPreviewTile) : null;
+  const placementPreviewTerrain = placementPreviewPos ? TERRAIN_INFO[terrainAt(placementPreviewPos)] : null;
   const selectedPos = game.selectedTile
-    ? { col: Number(game.selectedTile.split("-")[0]), row: Number(game.selectedTile.split("-")[1]) }
+    ? posForId(game.selectedTile)
     : game.unitPos;
   const selectedTerrain = terrainAt(selectedPos);
   const selectedImprovement = IMPROVEMENTS[idFor(selectedPos)] ?? null;
+  const selectedPlacedProductionId = placedProductionByTile.get(idFor(selectedPos)) ?? null;
+  const selectedPlacedProduction = PRODUCTIONS.find((item) => item.id === selectedPlacedProductionId) ?? null;
+  const selectedPlacedStatus = selectedPlacedProductionId
+    ? game.completedBuildings.includes(selectedPlacedProductionId)
+      ? "已建成"
+      : game.activeProduction === selectedPlacedProductionId ? "建造中" : "已规划"
+    : null;
   const yieldsFor = (pos: Position) => {
     const terrain = terrainAt(pos);
     const base = TERRAIN_INFO[terrain];
     const improvement = IMPROVEMENTS[idFor(pos)];
+    const placedProductionId = placedProductionByTile.get(idFor(pos)) ?? null;
+    const completedPlacedProduction = placedProductionId && game.completedBuildings.includes(placedProductionId)
+      ? PRODUCTIONS.find((item) => item.id === placedProductionId) ?? null
+      : null;
+    const placedYield = completedPlacedProduction ? 2 + placementAdjacencyFor(completedPlacedProduction.id, pos) : 0;
     const owned = isArgentineTerritory(pos);
     const footballBonus = game.footballTurns > 0 && owned ? 1 : 0;
     const husbandryBonus = owned && terrain === "grass" && game.completedTechs.includes("husbandry") ? 1 : 0;
     const argentinaCulture = owned && terrain === "grass" ? 1 : 0;
     return {
       ...base,
-      food: base.food + footballBonus + husbandryBonus + (improvement?.bonus.food ?? 0),
-      production: base.production + (improvement?.bonus.production ?? 0),
-      science: base.science + footballBonus + (improvement?.bonus.science ?? 0),
-      culture: base.culture + argentinaCulture + (improvement?.bonus.culture ?? 0),
+      food: base.food + footballBonus + husbandryBonus + (improvement?.bonus.food ?? 0) + (completedPlacedProduction?.yield === "food" ? placedYield : 0),
+      production: base.production + (improvement?.bonus.production ?? 0) + (completedPlacedProduction?.yield === "production" ? placedYield : 0),
+      science: base.science + footballBonus + (improvement?.bonus.science ?? 0) + (completedPlacedProduction?.yield === "science" ? placedYield : 0),
+      culture: base.culture + argentinaCulture + (improvement?.bonus.culture ?? 0) + (completedPlacedProduction?.yield === "culture" ? placedYield : 0),
     };
   };
   const selectedYield = yieldsFor(selectedPos);
   const maxMoves = 2 + (game.completedTechs.includes("riding") ? 1 : 0) + (game.footballTurns > 0 ? 1 : 0);
   const movementCosts = useMemo(() => {
-    if (!game.selectedUnit || game.unitMoves <= 0) return new Map<string, number>();
+    if (placingProduction || !game.selectedUnit || game.unitMoves <= 0) return new Map<string, number>();
     return movementRange(game.unitPos, game.unitMoves, new Set([idFor(game.brazilPos)]));
-  }, [game.selectedUnit, game.unitMoves, game.unitPos, game.brazilPos]);
+  }, [placingProduction, game.selectedUnit, game.unitMoves, game.unitPos, game.brazilPos]);
   const revealedCount = game.discovered.size;
   const objectives = [
     { label: "首都达到 5 人口", value: game.population, target: 5, done: game.population >= 5 },
@@ -255,6 +359,23 @@ export default function Home() {
   ];
 
   const addLog = (log: string[], entry: string) => [entry, ...log].slice(0, 4);
+
+  const cancelProductionPlacement = (keepDrawerOpen = true) => {
+    setPlacingProduction(null);
+    setPlacementCandidate(null);
+    setHoveredPlacementTile(null);
+    setPlacementDetailed(false);
+    setProductionDrawerOpen(keepDrawerOpen);
+    setGame((prev) => ({ ...prev, selectedTile: idFor(CITY_POS), selectedUnit: false, message: keepDrawerOpen ? "已返回生产列表。" : "已关闭首都生产。" }));
+  };
+
+  const closeProductionDrawer = () => {
+    setPlacingProduction(null);
+    setPlacementCandidate(null);
+    setHoveredPlacementTile(null);
+    setPlacementDetailed(false);
+    setProductionDrawerOpen(false);
+  };
 
   const openCapitalProduction = () => {
     if (aiThinking || game.result) return;
@@ -267,11 +388,28 @@ export default function Home() {
         : "请为布宜诺斯艾利斯安排一个生产项目。",
     }));
     setTechPickerOpen(false);
-    setProductionPickerOpen(true);
+    setPlacingProduction(null);
+    setPlacementCandidate(null);
+    setHoveredPlacementTile(null);
+    setProductionDrawerOpen(true);
   };
 
   const handleTileClick = (pos: Position) => {
     if (aiThinking || game.result) return;
+    if (placingProduction) {
+      const tileId = idFor(pos);
+      const placementError = productionPlacementError(game, placingProduction, pos);
+      if (placementError) {
+        setPlacementCandidate(null);
+        setGame((prev) => ({ ...prev, selectedTile: tileId, selectedUnit: false, message: `不能在这里建造：${placementError}。` }));
+        return;
+      }
+      const item = PRODUCTIONS.find((production) => production.id === placingProduction)!;
+      const adjacency = placementAdjacencyFor(placingProduction, pos);
+      setPlacementCandidate(tileId);
+      setGame((prev) => ({ ...prev, selectedTile: tileId, selectedUnit: false, message: `预览${item.name}：${TERRAIN_INFO[terrainAt(pos)].label}，相邻加成 +${adjacency} ${YIELD_META[item.yield].label}。` }));
+      return;
+    }
     if (idFor(pos) === idFor(CITY_POS) && !game.selectedUnit) {
       openCapitalProduction();
       return;
@@ -343,16 +481,61 @@ export default function Home() {
   const chooseProduction = (productionId: ProductionId) => {
     const item = PRODUCTIONS.find((production) => production.id === productionId);
     if (!item || aiThinking || game.result || game.completedBuildings.includes(productionId)) return;
+    const existingPlacement = game.buildingPlacements[productionId];
+    if (existingPlacement) {
+      setGame((prev) => ({
+        ...prev,
+        activeProduction: productionId,
+        selectedTile: existingPlacement,
+        selectedUnit: false,
+        message: `继续建造${item.name}，已有进度会保留。`,
+        log: addLog(prev.log, `布宜诺斯艾利斯继续建造${item.name}。`),
+      }));
+      setProductionDrawerOpen(false);
+      setPlacingProduction(null);
+      setPlacementCandidate(null);
+      setHoveredPlacementTile(null);
+    } else {
+      setPlacingProduction(productionId);
+      setPlacementCandidate(null);
+      setHoveredPlacementTile(null);
+      setPlacementDetailed(false);
+      setGame((prev) => ({
+        ...prev,
+        selectedTile: idFor(CITY_POS),
+        selectedUnit: false,
+        message: `请在地图上为${item.name}选择一个绿色六角格。`,
+      }));
+    }
+    setProductionReminderBypassed(false);
+  };
+
+  const confirmProductionPlacement = () => {
+    if (!placingProduction || !placementCandidate) return;
+    const item = PRODUCTIONS.find((production) => production.id === placingProduction)!;
+    const pos = posForId(placementCandidate);
+    const placementError = productionPlacementError(game, placingProduction, pos);
+    if (placementError) {
+      setGame((prev) => ({ ...prev, message: `不能在这里建造：${placementError}。` }));
+      return;
+    }
+    const adjacency = placementAdjacencyFor(placingProduction, pos);
+    const productionId = placingProduction;
+    const tileId = placementCandidate;
     setGame((prev) => ({
       ...prev,
       activeProduction: productionId,
-      selectedTile: idFor(CITY_POS),
+      buildingPlacements: { ...prev.buildingPlacements, [productionId]: tileId },
+      selectedTile: tileId,
       selectedUnit: false,
-      message: `${prev.activeProduction && prev.activeProduction !== productionId ? "已切换为" : "开始建造"}${item.name}，已有进度会保留。`,
-      log: addLog(prev.log, `布宜诺斯艾利斯开始建造${item.name}。`),
+      message: `${item.name}已落位，开始建造；相邻加成 +${adjacency} ${YIELD_META[item.yield].label}。`,
+      log: addLog(prev.log, `布宜诺斯艾利斯在${TERRAIN_INFO[terrainAt(pos)].label}上开工建造${item.name}。`),
     }));
     setProductionReminderBypassed(false);
-    setProductionPickerOpen(false);
+    setPlacingProduction(null);
+    setPlacementCandidate(null);
+    setHoveredPlacementTile(null);
+    setProductionDrawerOpen(false);
   };
 
   const recruitMessi = () => {
@@ -389,10 +572,10 @@ export default function Home() {
 
     aiTimerRef.current = setTimeout(() => {
       setGame((prev) => {
-        const scienceGain = 4 + prev.population + (prev.completedTechs.includes("federalism") ? 2 : 0) + (prev.completedBuildings.includes("academy") ? 2 : 0) + (prev.footballTurns > 0 ? 2 : 0);
-        const cultureGain = 3 + (prev.messiRecruited ? 2 : 0) + (prev.completedBuildings.includes("monument") ? 2 : 0) + (prev.footballTurns > 0 ? 2 : 0);
+        const scienceGain = 4 + prev.population + (prev.completedTechs.includes("federalism") ? 2 : 0) + (prev.completedBuildings.includes("academy") ? 2 + completedPlacementBonus(prev, "academy") : 0) + (prev.footballTurns > 0 ? 2 : 0);
+        const cultureGain = 3 + (prev.messiRecruited ? 2 : 0) + (prev.completedBuildings.includes("monument") ? 2 + completedPlacementBonus(prev, "monument") : 0) + (prev.footballTurns > 0 ? 2 : 0);
         const goldGain = 7 + (prev.footballTurns > 0 ? 3 : 0);
-        const foodGain = 4 + prev.population + (prev.completedTechs.includes("husbandry") ? 1 : 0) + (prev.completedBuildings.includes("granary") ? 2 : 0) + (prev.footballTurns > 0 ? 2 : 0);
+        const foodGain = 4 + prev.population + (prev.completedTechs.includes("husbandry") ? 1 : 0) + (prev.completedBuildings.includes("granary") ? 2 + completedPlacementBonus(prev, "granary") : 0) + (prev.footballTurns > 0 ? 2 : 0);
         const productionGain = cityProductionFor(prev);
         let food = prev.food + foodGain;
         let population = prev.population;
@@ -441,7 +624,11 @@ export default function Home() {
         const won = population >= 5 && completedTechs.length >= 2 && prev.discovered.size >= 26 && recruited;
         const lost = brazilInfluence >= 100;
         const turnEvents: string[] = [];
-        if (completedProduction) turnEvents.push(`布宜诺斯艾利斯完成了${completedProduction.name}：${completedProduction.effect}。`);
+        if (completedProduction) {
+          const placement = prev.buildingPlacements[completedProduction.id];
+          const adjacency = placement ? placementAdjacencyFor(completedProduction.id, posForId(placement)) : 0;
+          turnEvents.push(`布宜诺斯艾利斯完成了${completedProduction.name}：${completedProduction.effect}，相邻加成 +${adjacency} ${YIELD_META[completedProduction.yield].label}。`);
+        }
         if (completedName) turnEvents.push(`完成科技：${completedName}。请选择下一项研究。`);
         if (grew) turnEvents.push(`布宜诺斯艾利斯增长到 ${population} 人口！`);
         const summary = turnEvents.length ? turnEvents.join(" ") : `第 ${nextTurn} 回合开始，高乔侦骑恢复行动。`;
@@ -476,7 +663,7 @@ export default function Home() {
   }, [game.result]);
 
   const requestEndTurn = useCallback(() => {
-    if (aiThinking || game.result || techPickerOpen || productionPickerOpen) return;
+    if (aiThinking || game.result || techPickerOpen || productionDrawerOpen || placingProduction) return;
     if (!game.activeProduction && game.completedBuildings.length < PRODUCTIONS.length && !productionReminderBypassed) {
       setGame((prev) => ({
         ...prev,
@@ -484,25 +671,34 @@ export default function Home() {
         selectedUnit: false,
         message: "请先为布宜诺斯艾利斯安排生产，或选择本回合暂不生产。",
       }));
-      setProductionPickerOpen(true);
+      setProductionDrawerOpen(true);
       return;
     }
     setProductionReminderBypassed(false);
     endTurn();
-  }, [aiThinking, endTurn, game.activeProduction, game.completedBuildings.length, game.result, productionPickerOpen, productionReminderBypassed, techPickerOpen]);
+  }, [aiThinking, endTurn, game.activeProduction, game.completedBuildings.length, game.result, placingProduction, productionDrawerOpen, productionReminderBypassed, techPickerOpen]);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       const target = event.target as HTMLElement;
       if (event.key === "Enter" && !["BUTTON", "INPUT", "SELECT", "TEXTAREA"].includes(target.tagName)) requestEndTurn();
       if (event.key === "Escape") {
-        setTechPickerOpen(false);
-        setProductionPickerOpen(false);
+        if (placingProduction) {
+          setPlacingProduction(null);
+          setPlacementCandidate(null);
+          setHoveredPlacementTile(null);
+          setPlacementDetailed(false);
+          setGame((prev) => ({ ...prev, selectedTile: idFor(CITY_POS), message: "已取消建筑选址，返回生产列表。" }));
+        } else if (productionDrawerOpen) {
+          setProductionDrawerOpen(false);
+        } else {
+          setTechPickerOpen(false);
+        }
       }
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [requestEndTurn]);
+  }, [placingProduction, productionDrawerOpen, requestEndTurn]);
 
   useEffect(() => () => {
     if (aiTimerRef.current) clearTimeout(aiTimerRef.current);
@@ -514,7 +710,11 @@ export default function Home() {
     aiLockRef.current = false;
     setAiThinking(false);
     setTechPickerOpen(false);
-    setProductionPickerOpen(false);
+    setProductionDrawerOpen(false);
+    setPlacingProduction(null);
+    setPlacementCandidate(null);
+    setHoveredPlacementTile(null);
+    setPlacementDetailed(false);
     setProductionReminderBypassed(false);
     setGame(createInitialState());
   };
@@ -522,8 +722,8 @@ export default function Home() {
   const techPercent = activeTech ? Math.min(100, (game.techProgress / activeTech.cost) * 100) : 0;
   const productionPercent = activeProduction ? Math.min(100, activeProductionProgress / activeProduction.cost * 100) : 0;
   const cityGrowthTarget = 10 + game.population * 4;
-  const sciencePerTurn = 4 + game.population + (game.completedTechs.includes("federalism") ? 2 : 0) + (game.completedBuildings.includes("academy") ? 2 : 0) + (game.footballTurns > 0 ? 2 : 0);
-  const culturePerTurn = 3 + (game.messiRecruited ? 2 : 0) + (game.completedBuildings.includes("monument") ? 2 : 0) + (game.footballTurns > 0 ? 2 : 0);
+  const sciencePerTurn = 4 + game.population + (game.completedTechs.includes("federalism") ? 2 : 0) + (game.completedBuildings.includes("academy") ? 2 + completedPlacementBonus(game, "academy") : 0) + (game.footballTurns > 0 ? 2 : 0);
+  const culturePerTurn = 3 + (game.messiRecruited ? 2 : 0) + (game.completedBuildings.includes("monument") ? 2 + completedPlacementBonus(game, "monument") : 0) + (game.footballTurns > 0 ? 2 : 0);
   const cityTileLeft = CITY_POS.col * 70;
   const cityTileTop = CITY_POS.row * 82 + (CITY_POS.col % 2) * 41;
   const cityStyle = { left: cityTileLeft - 39, top: cityTileTop + 57 };
@@ -569,7 +769,7 @@ export default function Home() {
               <div><strong>{game.techProgress}</strong><span>/ {activeTech?.cost ?? "—"}</span></div>
             </div>
             <div className="progress-copy"><span>预计完成</span><strong>{activeTech ? `${Math.max(1, Math.ceil((activeTech.cost - game.techProgress) / (4 + game.population)))} 回合` : "等待选择"}</strong></div>
-            <button className="tech-change" onClick={() => setTechPickerOpen(true)} data-testid="open-tech-picker">{activeTech ? "更换研究" : "选择下一项研究"}</button>
+            <button className="tech-change" onClick={() => { closeProductionDrawer(); setTechPickerOpen(true); }} data-testid="open-tech-picker">{activeTech ? "更换研究" : "选择下一项研究"}</button>
           </section>
 
           <section className="paper-card mission-card">
@@ -585,9 +785,9 @@ export default function Home() {
             <div className="card-kicker">当前选择</div>
             <div className="selection-heading">
               <span className={`selection-swatch ${selectedTerrain}`} aria-hidden="true"><i /></span>
-              <div><h3>{selectedImprovement?.name ?? selectedYield.label}</h3><p>{selectedImprovement ? `${selectedYield.label}上的改良设施` : "未改良地块"}</p></div>
+              <div><h3>{selectedPlacedProduction?.name ?? selectedImprovement?.name ?? selectedYield.label}</h3><p>{selectedPlacedProduction ? `${selectedYield.label}上的城市建筑 · ${selectedPlacedStatus}` : selectedImprovement ? `${selectedYield.label}上的改良设施` : "未改良地块"}</p></div>
             </div>
-            <div className="selection-meta"><span>{isArgentineTerritory(selectedPos) ? "阿根廷领土" : isBrazilianTerritory(selectedPos) ? "巴西领土" : "中立地块"}</span><b>{selectedImprovement ? "已建设" : "自然地貌"}</b></div>
+            <div className="selection-meta"><span>{isArgentineTerritory(selectedPos) ? "阿根廷领土" : isBrazilianTerritory(selectedPos) ? "巴西领土" : "中立地块"}</span><b>{selectedPlacedStatus ?? (selectedImprovement ? "已建设" : "自然地貌")}</b></div>
             <div><span><i className="yield-dot food">粮</i>食物</span><b>{selectedYield.food}</b></div>
             <div><span><i className="yield-dot production">锤</i>生产</span><b>{selectedYield.production}</b></div>
             <div><span><i className="yield-dot science">科</i>科技</span><b>{selectedYield.science}</b></div>
@@ -595,7 +795,7 @@ export default function Home() {
           </section>
         </aside>
 
-        <section className="map-stage" aria-label="世界地图">
+        <section className={`map-stage ${placingProduction ? "placement-lens" : ""}`} aria-label="世界地图">
           <div className="map-wash map-wash-one" />
           <div className="map-wash map-wash-two" />
           <div className="yield-controls" aria-label="地块收益图例">
@@ -604,7 +804,8 @@ export default function Home() {
               {showYields ? "隐藏收益" : "显示收益"}
             </button>
           </div>
-          <div className="hex-board" role="grid" aria-label="潘帕斯六角格地图">
+          {placingItem && <div className="placement-lens-banner" role="status"><span>{placingItem.icon}</span><div><b>为{placingItem.name}选择地块</b><small>绿色六角格可以建造 · 点击后在右侧确认</small></div><kbd>Esc 取消</kbd></div>}
+          <div className={`hex-board ${placingProduction ? "placement-mode" : ""}`} role="grid" aria-label={placingItem ? `为${placingItem.name}选择建设地块` : "潘帕斯六角格地图"}>
             {tiles.map(({ terrain, col, row }) => {
               const pos = { col, row };
               const tileId = idFor(pos);
@@ -616,23 +817,43 @@ export default function Home() {
               const owned = isArgentineTerritory(pos);
               const rival = isBrazilianTerritory(pos);
               const improvement = IMPROVEMENTS[tileId];
+              const placedProductionId = placedProductionByTile.get(tileId) ?? null;
+              const placedProduction = PRODUCTIONS.find((item) => item.id === placedProductionId) ?? null;
+              const buildingCompleted = placedProductionId ? game.completedBuildings.includes(placedProductionId) : false;
+              const buildingUnderConstruction = Boolean(placedProduction && !buildingCompleted);
+              const placementOption = placementOptions.get(tileId) ?? null;
+              const placementValid = Boolean(placingItem && placementOption && !placementOption.error);
+              const placementInvalid = Boolean(placingItem && placementOption?.error && discovered && owned && CITY_BUILDABLE_IDS.has(tileId));
+              const placementCandidateSelected = placementCandidate === tileId;
+              const placementFeatured = placementValid && placementOption!.adjacency === bestPlacementAdjacency && bestPlacementAdjacency > 0;
               const tileYield = yieldsFor(pos);
               const containsUnit = tileId === idFor(game.unitPos) ? "，高乔侦骑在此" : tileId === idFor(game.brazilPos) ? "，巴西斥候在此" : "";
               const yieldLabel = discovered ? `，粮食 ${tileYield.food}，生产 ${tileYield.production}，科技 ${tileYield.science}，文化 ${tileYield.culture}` : "";
-              const tileName = improvement ? `${improvement.name}，位于${info.label}` : info.label;
+              const tileName = placedProduction ? `${placedProduction.name}，位于${info.label}，${buildingCompleted ? "已建成" : "建造中"}` : improvement ? `${improvement.name}，位于${info.label}` : info.label;
+              const placementLabel = placingItem
+                ? placementValid
+                  ? `，可以建造${placingItem.name}，预计总加成 ${2 + placementOption!.adjacency} ${YIELD_META[placingItem.yield].label}`
+                  : `，不能建造${placingItem.name}：${placementOption?.error ?? "不可用"}`
+                : "";
               return (
                 <button
-                  className={`hex-tile ${terrain} ${owned ? "owned" : ""} ${rival ? "rival" : ""} ${discovered ? "" : "fog"} ${reachable ? "reachable" : ""} ${selected ? "selected" : ""} ${game.footballTurns > 0 && owned ? "football-benefit" : ""}`}
+                  className={`hex-tile ${terrain} ${owned ? "owned" : ""} ${rival ? "rival" : ""} ${discovered ? "" : "fog"} ${reachable ? "reachable" : ""} ${selected && !placingProduction ? "selected" : ""} ${game.footballTurns > 0 && owned ? "football-benefit" : ""} ${placedProduction ? "has-city-building" : ""} ${buildingUnderConstruction ? "construction-site" : ""} ${placementValid ? "placement-valid" : ""} ${placementInvalid ? "placement-invalid" : ""} ${placingItem && !placementValid && !placementInvalid ? "placement-dim" : ""} ${placementCandidateSelected ? "placement-candidate" : ""}`}
                   key={tileId}
                   style={{ left: col * 70, top: row * 82 + (col % 2) * 41 }}
-                  aria-label={`${discovered ? tileName : "未知"}地块，第 ${row + 1} 行第 ${col + 1} 列${yieldLabel}${containsUnit}${reachable ? `，可以移动，需要 ${moveCost} 点移动力` : ""}`}
-                  aria-selected={selected}
+                  aria-label={`${discovered ? tileName : "未知"}地块，第 ${row + 1} 行第 ${col + 1} 列${yieldLabel}${containsUnit}${reachable ? `，可以移动，需要 ${moveCost} 点移动力` : ""}${placementLabel}`}
+                  aria-selected={placementCandidateSelected || (!placingProduction && selected)}
                   role="gridcell"
                   data-testid={`tile-${tileId}`}
                   onClick={() => handleTileClick(pos)}
+                  onMouseEnter={() => placingProduction && setHoveredPlacementTile(tileId)}
+                  onMouseLeave={() => hoveredPlacementTile === tileId && setHoveredPlacementTile(null)}
+                  onFocus={() => placingProduction && setHoveredPlacementTile(tileId)}
+                  tabIndex={placingProduction && !placementValid ? -1 : 0}
                   disabled={aiThinking || Boolean(game.result)}
                 >
-                  {discovered ? improvement ? (
+                  {discovered ? placedProduction ? (
+                    <span className={`city-building-art building-${placedProduction.id} ${buildingCompleted ? "completed" : "building"}`} aria-hidden="true"><i /><i /><i /><i /><b>{buildingCompleted ? placedProduction.icon : "⌁"}</b></span>
+                  ) : improvement ? (
                     <span className={`improvement-art improvement-${improvement.type}`} aria-hidden="true"><i /><i /><i /><i /><b /></span>
                   ) : (
                     <span className={`terrain-art art-${terrain}`} aria-hidden="true"><i /><i /><i /><i /></span>
@@ -640,7 +861,7 @@ export default function Home() {
                     <span className="fog-mark" aria-hidden="true">?</span>
                   )}
                   {discovered && (
-                    <span className={`tile-yields ${showYields ? "visible" : ""}`} aria-hidden="true">
+                    <span className={`tile-yields ${showYields || Boolean(placingProduction) ? "visible" : ""}`} aria-hidden="true">
                       {tileYield.food > 0 && <i className="food">粮<b>{tileYield.food}</b></i>}
                       {tileYield.production > 0 && <i className="production">锤<b>{tileYield.production}</b></i>}
                       {tileYield.science > 0 && <i className="science">科<b>{tileYield.science}</b></i>}
@@ -648,27 +869,29 @@ export default function Home() {
                     </span>
                   )}
                   {reachable && <span className="move-overlay" aria-hidden="true"><svg className="hex-ring" viewBox="0 0 100 100" preserveAspectRatio="none"><polygon points="25,2 75,2 98,50 75,98 25,98 2,50" /></svg><i /><b>{moveCost}</b></span>}
-                  {selected && <span className="selection-overlay" aria-hidden="true"><svg className="hex-ring" viewBox="0 0 100 100" preserveAspectRatio="none"><polygon points="25,2 75,2 98,50 75,98 25,98 2,50" /></svg></span>}
+                  {placementValid && placingItem && <span className={`placement-overlay ${placementFeatured ? "featured" : ""} ${placementCandidateSelected ? "candidate" : ""}`} aria-hidden="true"><svg className="hex-ring" viewBox="0 0 100 100" preserveAspectRatio="none"><polygon points="25,2 75,2 98,50 75,98 25,98 2,50" /></svg><b>{placementCandidateSelected ? "✓" : `+${2 + placementOption!.adjacency}${YIELD_META[placingItem.yield].symbol}`}</b><small>{placementCandidateSelected ? "已选择" : placementFeatured ? "高收益" : "可建造"}</small></span>}
+                  {placementInvalid && <span className="placement-invalid-mark" aria-hidden="true">×</span>}
+                  {selected && !placingProduction && <span className="selection-overlay" aria-hidden="true"><svg className="hex-ring" viewBox="0 0 100 100" preserveAspectRatio="none"><polygon points="25,2 75,2 98,50 75,98 25,98 2,50" /></svg></span>}
                 </button>
               );
             })}
 
-            <button className={`map-piece capital-piece ${citySelected ? "capital-selected" : ""}`} style={cityStyle} aria-label={`布宜诺斯艾利斯，阿根廷首都，${game.population} 人口，${activeProduction ? `正在建造${activeProduction.name}，还需 ${productionTurnsRemaining} 回合` : "等待安排生产"}`} onClick={openCapitalProduction} data-testid="capital-city">
+            <button className={`map-piece capital-piece ${citySelected ? "capital-selected" : ""} ${placingProduction ? "placement-locked" : ""}`} style={cityStyle} aria-label={`布宜诺斯艾利斯，阿根廷首都，${game.population} 人口，${activeProduction ? `正在建造${activeProduction.name}，还需 ${productionTurnsRemaining} 回合` : "等待安排生产"}`} onClick={openCapitalProduction} data-testid="capital-city" disabled={Boolean(placingProduction)}>
               <span className="place-label"><b>★</b> 布宜诺斯艾利斯 <em>{game.population}</em><small className={activeProduction ? "building" : "idle"}>锤 {activeProduction ? `${activeProduction.name} · ${productionTurnsRemaining}` : "待生产"}</small></span>
             </button>
 
-            <button className={`map-piece unit-piece gaucho-piece ${game.selectedUnit ? "piece-selected" : ""}`} style={unitStyle} aria-label={`高乔侦骑，${game.unitMoves} 点移动力`} data-testid="gaucho-unit" onClick={() => setGame((prev) => ({ ...prev, selectedUnit: true, selectedTile: idFor(prev.unitPos), message: "高乔侦骑已选择；绿色落点是本回合可达范围。" }))}>
+            <button className={`map-piece unit-piece gaucho-piece ${game.selectedUnit ? "piece-selected" : ""} ${placingProduction ? "placement-locked" : ""}`} style={unitStyle} aria-label={`高乔侦骑，${game.unitMoves} 点移动力`} data-testid="gaucho-unit" onClick={() => setGame((prev) => ({ ...prev, selectedUnit: true, selectedTile: idFor(prev.unitPos), message: "高乔侦骑已选择；绿色落点是本回合可达范围。" }))} disabled={Boolean(placingProduction)}>
               <span className="unit-token" aria-hidden="true"><b>高</b><small>{game.unitMoves}</small></span>
               <span className="unit-label">高乔侦骑</span>
             </button>
 
-            <button className="map-piece rival-piece" style={brazilStyle} aria-label="巴西斥候" onClick={() => setGame((prev) => ({ ...prev, selectedUnit: false, selectedTile: idFor(prev.brazilPos), message: "巴西斥候：目前保持中立。" }))}>
+            <button className={`map-piece rival-piece ${placingProduction ? "placement-locked" : ""}`} style={brazilStyle} aria-label="巴西斥候" onClick={() => setGame((prev) => ({ ...prev, selectedUnit: false, selectedTile: idFor(prev.brazilPos), message: "巴西斥候：目前保持中立。" }))} disabled={Boolean(placingProduction)}>
               <span className="unit-token" aria-hidden="true"><b>巴</b></span>
               <span className="unit-label">巴西斥候</span>
             </button>
 
             {game.messiRecruited && (
-              <button className="map-piece messi-piece" style={messiStyle} aria-label="伟人莱昂内尔·梅西位于布宜诺斯艾利斯" onClick={activateMessi}>
+              <button className={`map-piece messi-piece ${placingProduction ? "placement-locked" : ""}`} style={messiStyle} aria-label="伟人莱昂内尔·梅西位于布宜诺斯艾利斯" onClick={activateMessi} disabled={Boolean(placingProduction)}>
                 <span className="messi-map-token"><b>10</b><i>⚽</i></span>
               </button>
             )}
@@ -728,7 +951,7 @@ export default function Home() {
         </aside>
       </section>
 
-      <div className={`action-dock ${citySelected ? "city-mode" : ""}`} role="region" aria-label={citySelected ? "首都生产操作" : "选中单位操作"}>
+      <div className={`action-dock ${citySelected ? "city-mode" : ""} ${placingProduction ? "placement-hidden" : ""}`} role="region" aria-label={citySelected ? "首都生产操作" : "选中单位操作"}>
         <div className="selected-unit">
           <span className="unit-portrait" aria-hidden="true">{game.selectedUnit ? "高" : citySelected ? "★" : "⌖"}</span>
           <div className="selected-copy"><small>{game.selectedUnit ? "● 单位已选择" : citySelected ? "● 首都已选择" : "当前地块"}</small><strong>{game.selectedUnit ? "高乔侦骑" : citySelected ? "布宜诺斯艾利斯" : selectedImprovement?.name ?? selectedYield.label}</strong>{game.selectedUnit && <span className="movement-pips" aria-label={`${game.unitMoves} / ${maxMoves} 移动力`}>{Array.from({ length: maxMoves }, (_, index) => <i className={index < game.unitMoves ? "available" : "spent"} key={index} />)}<b>{game.unitMoves}/{maxMoves}</b></span>}<span>{game.selectedUnit ? game.unitMoves > 0 ? "选择绿色落点移动" : "本回合移动力已用完" : citySelected ? `人口 ${game.population} · +${productionPerTurn} 锤/回合` : "点击单位或首都下达命令"}</span></div>
@@ -748,7 +971,7 @@ export default function Home() {
         )}
       </div>
 
-      <button className="end-turn-button" onClick={requestEndTurn} disabled={aiThinking || Boolean(game.result)} data-testid="end-turn"><span>{aiThinking ? "巴西行动中" : "结束回合"}</span><small>Enter</small></button>
+      <button className="end-turn-button" onClick={requestEndTurn} disabled={aiThinking || Boolean(game.result) || Boolean(placingProduction) || productionDrawerOpen} data-testid="end-turn"><span>{aiThinking ? "巴西行动中" : placingProduction ? "请选择地块" : "结束回合"}</span><small>Enter</small></button>
 
       <div className="event-toast" role="status" aria-live="polite">{game.message}</div>
 
@@ -767,23 +990,64 @@ export default function Home() {
         </div>
       )}
 
-      {productionPickerOpen && (
-        <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && setProductionPickerOpen(false)}>
-          <section className="tech-modal production-modal" role="dialog" aria-modal="true" aria-labelledby="production-title">
-            <div className="modal-header"><div><span>城市生产</span><h2 id="production-title">布宜诺斯艾利斯建造什么？</h2><p>当前产出：每回合 +{productionPerTurn} 锤。切换项目会保留各自进度。</p></div><button onClick={() => setProductionPickerOpen(false)} aria-label="关闭生产列表">×</button></div>
-            <div className="tech-grid production-grid">
+      <aside className={`production-drawer ${productionDrawerOpen ? "open" : ""} ${placingItem ? "placing" : ""}`} role="dialog" aria-modal="false" aria-labelledby="production-title" aria-hidden={!productionDrawerOpen}>
+        <header className="production-drawer-header">
+          {placingItem && <button className="drawer-back" onClick={() => cancelProductionPlacement(true)} aria-label="返回生产列表">‹</button>}
+          <div><span>{placingItem ? "建筑选址" : "城市生产"}</span><h2 id="production-title">{placingItem ? placingItem.name : "布宜诺斯艾利斯"}</h2><p>{placingItem ? placingItem.placementRule : `每回合 +${productionPerTurn} 锤 · 人口 ${game.population}`}</p></div>
+          <button className="drawer-close" onClick={closeProductionDrawer} aria-label="关闭生产面板">×</button>
+        </header>
+
+        {!placingItem && <div className="production-tabs" role="tablist"><button className="active" role="tab" aria-selected="true">生产</button><button role="tab" aria-selected="false" disabled>购买</button></div>}
+
+        {!placingItem && activeProduction && (
+          <section className="active-production-card" aria-label="当前生产">
+            <span className="active-project-icon">{activeProduction.icon}</span>
+            <div><small>当前生产</small><strong>{activeProduction.name}</strong><p>{game.productionProgress[activeProduction.id]}/{activeProduction.cost} 锤 · {productionTurnsRemaining} 回合</p><i><b style={{ width: `${productionPercent}%` }} /></i></div>
+            <em>{game.buildingPlacements[activeProduction.id] ? "已落位" : "待选址"}</em>
+          </section>
+        )}
+
+        {placingItem ? (
+          <div className="placement-inspector">
+            <section className="placement-project-card">
+              <span className={`project-yield ${placingItem.yield}`}>{placingItem.icon}</span>
+              <div><small>{placingItem.category}</small><h3>{placingItem.name}</h3><p>{placingItem.effect}</p></div>
+            </section>
+            <div className="placement-steps"><span className="done">1 选择项目</span><i /><span className={placementCandidate ? "done" : "active"}>2 选择地块</span><i /><span className={placementCandidate ? "active" : ""}>3 确认</span></div>
+            <p className="placement-instruction">在地图上选择一个绿色六角格。格内数字是“基础产出 + 相邻加成”的总收益。</p>
+
+            <section className={`placement-tile-preview ${placementPreviewOption?.error ? "invalid" : placementPreviewTile ? "valid" : "empty"}`} aria-live="polite">
+              {placementPreviewTile && placementPreviewTerrain && placementPreviewOption ? (
+                <>
+                  <div className="preview-heading"><span className={`preview-hex ${terrainAt(posForId(placementPreviewTile))}`} aria-hidden="true" /><div><small>第 {posForId(placementPreviewTile).row + 1} 行 · 第 {posForId(placementPreviewTile).col + 1} 列</small><strong>{placementPreviewTerrain.label}</strong></div><b>{placementPreviewOption.error ? "不可建造" : placementCandidate === placementPreviewTile ? "已选择" : "地块预览"}</b></div>
+                  {placementPreviewOption.error ? <p className="placement-error">× {placementPreviewOption.error}</p> : <><div className="yield-delta-row"><span>建筑基础</span><b className={placingItem.yield}>+2 {YIELD_META[placingItem.yield].label}</b></div><div className="yield-delta-row"><span>相邻加成</span><b className={placingItem.yield}>+{placementPreviewOption.adjacency} {YIELD_META[placingItem.yield].label}</b></div><div className="yield-delta-total"><span>建成后总收益</span><strong className={placingItem.yield}>↑ +{2 + placementPreviewOption.adjacency} {YIELD_META[placingItem.yield].label}</strong></div></>}
+                </>
+              ) : <div className="preview-empty"><span>⬡</span><p>将鼠标移到绿色地块上查看收益<br />点击地块进行选择</p></div>}
+            </section>
+
+            {placementPreviewTile && placementPreviewOption && !placementPreviewOption.error && <button className="placement-detail-toggle" onClick={() => setPlacementDetailed((value) => !value)} aria-expanded={placementDetailed}>{placementDetailed ? "收起详细数据" : "查看详细数据"}</button>}
+            {placementDetailed && placementPreviewTerrain && placementPreviewOption && !placementPreviewOption.error && <section className="placement-details"><div><span>原地块</span><b>粮 {placementPreviewTerrain.food} · 锤 {placementPreviewTerrain.production} · 科 {placementPreviewTerrain.science} · 文 {placementPreviewTerrain.culture}</b></div><div><span>邻接来源</span><b>{placementPreviewOption.adjacency > 0 ? `${placementPreviewOption.adjacency} 个相邻地貌` : "无相邻加成"}</b></div><div><span>占用规则</span><b>保留原地块产出</b></div></section>}
+
+            <div className="placement-actions"><button onClick={() => cancelProductionPlacement(true)}>取消选址</button><button className="confirm" onClick={confirmProductionPlacement} disabled={!placementCandidate} data-testid="confirm-production-placement">{placementCandidate ? "确认在此建造" : "请先选择地块"}</button></div>
+          </div>
+        ) : (
+          <div className="production-choice-view">
+            <div className="production-category-heading"><div><span>▾</span><strong>建筑与区域</strong></div><small>{PRODUCTIONS.length - game.completedBuildings.length} 项可用</small></div>
+            <div className="production-list">
               {PRODUCTIONS.map((production) => {
                 const done = game.completedBuildings.includes(production.id);
                 const active = game.activeProduction === production.id;
                 const progress = game.productionProgress[production.id];
                 const turns = Math.max(1, Math.ceil((production.cost - progress) / productionPerTurn));
-                return <button key={production.id} disabled={done} className={active ? "active" : ""} onClick={() => chooseProduction(production.id)} data-testid={`production-${production.id}`}><span>{production.icon}</span><div><em>{production.category}</em><h3>{production.name}</h3><p>{production.effect}</p><small>{done ? "已建成" : active ? `${progress}/${production.cost} 锤 · 还需 ${turns} 回合` : `${production.cost} 锤 · 预计 ${turns} 回合`}</small>{progress > 0 && !done && <i><b style={{ width: `${Math.min(100, progress / production.cost * 100)}%` }} /></i>}</div></button>;
+                const adjacency = bestAvailableAdjacency(game, production.id);
+                const placed = Boolean(game.buildingPlacements[production.id]);
+                return <button key={production.id} disabled={done} className={`production-list-item ${active ? "active" : ""}`} onClick={() => chooseProduction(production.id)} data-testid={`production-${production.id}`}><span className={`project-yield ${production.yield}`}>{production.icon}</span><div className="production-item-copy"><em>{production.category}</em><h3>{production.name}</h3><p>{production.effect} · 最高相邻 +{adjacency}</p>{progress > 0 && !done && <i><b style={{ width: `${Math.min(100, progress / production.cost * 100)}%` }} /></i>}<small>{done ? "已建成" : placed ? "已落位 · 可继续建造" : production.placementRule}</small></div><div className="production-item-cost"><strong>{done ? "✓" : turns}</strong><span>{done ? "完成" : "回合"}</span><small>{production.cost} 锤</small></div></button>;
               })}
             </div>
-            <button className="production-skip" onClick={() => { setProductionReminderBypassed(true); setProductionPickerOpen(false); setGame((prev) => ({ ...prev, message: "本回合暂不生产；再次点击结束回合即可继续。" })); }}>本回合暂不生产</button>
-          </section>
-        </div>
-      )}
+            <button className="production-skip" onClick={() => { setProductionReminderBypassed(true); setProductionDrawerOpen(false); setGame((prev) => ({ ...prev, message: "本回合暂不生产；再次点击结束回合即可继续。" })); }}>本回合暂不生产</button>
+          </div>
+        )}
+      </aside>
 
       {game.result && (
         <div className="modal-backdrop result-backdrop">
