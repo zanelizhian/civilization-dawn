@@ -662,6 +662,32 @@ function growthTileError(state: GameState, cityId: CityId, pos: Position, knownF
   return null;
 }
 
+function skipCityGrowth(state: GameState, cityId: CityId): GameState {
+  const currentCity = cityById(state, cityId);
+  if (!currentCity || currentCity.growthPending <= 0) return state;
+  const population = currentCity.population + 1;
+  let growthPending = Math.max(0, currentCity.growthPending - 1);
+  let food = currentCity.food;
+  const nextTarget = 10 + population * 4;
+  if (growthPending === 0 && food >= nextTarget) {
+    food -= nextTarget;
+    growthPending += 1;
+  }
+  const cities = state.cities.map((city) => city.id === currentCity.id ? { ...city, population, food, growthPending } : city);
+  const message = `${currentCity.name}跳过本次地块开发；人口增至 ${population}，边界保持不变。`;
+  const won = hasWonDawn({ cities, messiRecruited: state.messiRecruited, legacyPoints: state.legacyPoints });
+  return {
+    ...state,
+    cities,
+    selectedTile: idFor(currentCity.pos),
+    selectedUnitId: null,
+    message,
+    log: addLog(state.log, message),
+    result: won ? "win" : state.result,
+    resultReason: won ? "legacy" : state.resultReason,
+  };
+}
+
 function placedBuildingAt(state: GameState, tileId: string) {
   for (const city of state.cities) {
     const entry = Object.entries(city.buildingPlacements).find(([, placedTile]) => placedTile === tileId);
@@ -2225,6 +2251,19 @@ export default function Home() {
     requestAnimationFrame(() => focusMapOn(pos));
   };
 
+  const skipGrowthSelection = () => {
+    if (aiThinking || aiLockRef.current || managingCity.growthPending <= 0) return;
+    const remainingAfterSkip = Math.max(0, managingCity.growthPending - 1);
+    const nextPopulation = managingCity.population + 1;
+    const chainedGrowth = remainingAfterSkip === 0 && managingCity.food >= 10 + nextPopulation * 4;
+    setGame((prev) => skipCityGrowth(prev, managingCity.id));
+    setGrowthCandidate(null);
+    setHoveredGrowthTile(null);
+    setNewlyClaimedTile(null);
+    if (!chainedGrowth && remainingAfterSkip === 0) setGrowthDrawerOpen(false);
+    requestAnimationFrame(() => focusMapOn(managingCity.pos));
+  };
+
   const handleTileClick = (pos: Position) => {
     if (aiThinking || game.result) return;
     if (growthChoosing) {
@@ -3464,15 +3503,15 @@ export default function Home() {
       </aside>
 
       <aside className={`growth-drawer ${growthDrawerOpen ? "open" : ""}`} role="dialog" aria-modal="false" aria-labelledby="growth-title" aria-hidden={!growthDrawerOpen}>
-        <header className="growth-drawer-header"><div><span>城市成长 · 粮食驱动</span><h2 id="growth-title">{managingCity.growthPending > 0 ? `${managingCity.name} · 人口 +1` : `${managingCity.name}成长`}</h2><p>{managingCity.growthPending > 0 ? "开发一格后，政治边界自动覆盖它外围的一圈。" : "开发区块决定城市边界；成长槽满后直接开发地块。"}</p></div><button className="drawer-close" onClick={() => { setGrowthDrawerOpen(false); setGrowthCandidate(null); }} aria-label="关闭城市成长">×</button></header>
+        <header className="growth-drawer-header"><div><span>城市成长 · 粮食驱动</span><h2 id="growth-title">{managingCity.growthPending > 0 ? `${managingCity.name} · 人口 +1` : `${managingCity.name}成长`}</h2><p>{managingCity.growthPending > 0 ? "开发地块会扩张边界；也可跳过开发，人口仍会增长。" : "开发区块决定城市边界；成长槽满后直接开发地块。"}</p></div><button className="drawer-close" onClick={() => { setGrowthDrawerOpen(false); setGrowthCandidate(null); }} aria-label="关闭城市成长">×</button></header>
         <div className="growth-drawer-body">
-          <section className={`growth-hero-card ${managingCity.growthPending > 0 ? "ready" : ""}`}><div className="growth-pop-change"><span>{managingCity.population}</span><i>→</i><strong>{managingCity.population + (managingCity.growthPending > 0 ? 1 : 0)}</strong><small>人口</small></div><div className="growth-hero-copy"><small>{managingCity.growthPending > 0 ? `待分配 ${managingCity.growthPending} 次成长` : "下一次成长"}</small><strong>{managingCity.growthPending > 0 ? "选择一个青色六角格" : `还需 ${Math.max(0, cityGrowthTarget - managingCity.food)} 食物`}</strong><i><b style={{ width: `${managingCity.growthPending > 0 ? 100 : Math.min(100, managingCity.food / cityGrowthTarget * 100)}%` }} /></i><p>{managingCity.name}开发核心 {cityDevelopedTileIds(managingCity).length} 格 · 全国边界 {game.ownedTiles.length} 格</p></div></section>
+          <section className={`growth-hero-card ${managingCity.growthPending > 0 ? "ready" : ""}`}><div className="growth-pop-change"><span>{managingCity.population}</span><i>→</i><strong>{managingCity.population + (managingCity.growthPending > 0 ? 1 : 0)}</strong><small>人口</small></div><div className="growth-hero-copy"><small>{managingCity.growthPending > 0 ? `待分配 ${managingCity.growthPending} 次成长` : "下一次成长"}</small><strong>{managingCity.growthPending > 0 ? growthOptions.size > 0 ? "选择青色格，或跳过开发" : "暂无地块，可直接跳过开发" : `还需 ${Math.max(0, cityGrowthTarget - managingCity.food)} 食物`}</strong><i><b style={{ width: `${managingCity.growthPending > 0 ? 100 : Math.min(100, managingCity.food / cityGrowthTarget * 100)}%` }} /></i><p>{managingCity.name}开发核心 {cityDevelopedTileIds(managingCity).length} 格 · 全国边界 {game.ownedTiles.length} 格</p></div></section>
           {managingCity.growthPending > 0 ? <>
             <div className="growth-steps"><span className="done">1 粮食槽满</span><i /><span className={growthCandidate ? "done" : "active"}>2 选择地块</span><i /><span className={growthCandidate ? "active" : ""}>3 确认</span></div>
-            <p className="growth-instruction">青色格属于当前边界，并且紧邻已有开发区；设施由地形和资源自动匹配。</p>
+            <p className={`growth-instruction ${growthOptions.size === 0 ? "empty" : ""}`}>{growthOptions.size > 0 ? "青色格属于当前边界，并且紧邻已有开发区；设施由地形和资源自动匹配。" : "当前没有符合条件的地块；可跳过本次开发，人口仍会增长。"}</p>
             <section className="growth-recommendations"><header><strong>总督建议</strong><span>{growthOptions.size} 格可选</span></header>{recommendedGrowthOptions.map(([tileId, option], index) => { const pos = posForId(tileId); return <button key={tileId} className={growthCandidate === tileId ? "active" : ""} onClick={() => { setGrowthCandidate(tileId); setGame((prev) => ({ ...prev, selectedTile: tileId, selectedUnitId: null, message: `已选择${IMPROVEMENT_INFO[option.improvement].name}方案。` })); focusMapOn(pos); }} data-testid={`growth-option-${tileId}`}><b>{index + 1}</b><div><strong>{RESOURCE_TILES[tileId] ? RESOURCE_INFO[RESOURCE_TILES[tileId]].name : TERRAIN_INFO[terrainAt(pos)].label}</strong><small>{option.borderGain > 0 ? `边界 +${option.borderGain}` : "填充核心"} · {IMPROVEMENT_INFO[option.improvement].name}</small></div><span>粮{option.after.food} 锤{option.after.production}<br />科{option.after.science} 文{option.after.culture} 金{option.after.gold}</span></button>; })}</section>
-            <section className={`growth-tile-preview ${growthPreviewOption ? "selected" : "empty"}`}>{growthPreviewOption && growthPreviewPos ? <><header><div><small>{growthPreviewOption.borderGain > 0 ? `开发后边界 +${growthPreviewOption.borderGain} 格` : "填充现有开发区"}</small><strong>{growthPreviewResource?.name ?? TERRAIN_INFO[terrainAt(growthPreviewPos)].label}</strong></div><b>{IMPROVEMENT_INFO[growthPreviewOption.improvement].name}</b></header><div className="growth-yield-compare"><span>自然：粮{growthPreviewOption.before.food} 锤{growthPreviewOption.before.production} 科{growthPreviewOption.before.science} 文{growthPreviewOption.before.culture} 金{growthPreviewOption.before.gold}</span><i>→</i><strong>开发：粮{growthPreviewOption.after.food} 锤{growthPreviewOption.after.production} 科{growthPreviewOption.after.science} 文{growthPreviewOption.after.culture} 金{growthPreviewOption.after.gold}</strong></div></> : <div className="growth-preview-empty"><span>⬡</span><strong>在地图或建议中选择一格</strong><p>确认前会显示产出与边界变化。</p></div>}</section>
-            <div className="growth-actions"><button onClick={() => setGrowthCandidate(null)}>重新选择</button><button className="confirm" onClick={confirmGrowthSelection} disabled={!growthCandidate} data-testid="confirm-growth">{growthCandidate ? "确认开发并外推边界" : "请先选择地块"}</button></div>
+            <section className={`growth-tile-preview ${growthPreviewOption ? "selected" : "empty"}`}>{growthPreviewOption && growthPreviewPos ? <><header><div><small>{growthPreviewOption.borderGain > 0 ? `开发后边界 +${growthPreviewOption.borderGain} 格` : "填充现有开发区"}</small><strong>{growthPreviewResource?.name ?? TERRAIN_INFO[terrainAt(growthPreviewPos)].label}</strong></div><b>{IMPROVEMENT_INFO[growthPreviewOption.improvement].name}</b></header><div className="growth-yield-compare"><span>自然：粮{growthPreviewOption.before.food} 锤{growthPreviewOption.before.production} 科{growthPreviewOption.before.science} 文{growthPreviewOption.before.culture} 金{growthPreviewOption.before.gold}</span><i>→</i><strong>开发：粮{growthPreviewOption.after.food} 锤{growthPreviewOption.after.production} 科{growthPreviewOption.after.science} 文{growthPreviewOption.after.culture} 金{growthPreviewOption.after.gold}</strong></div></> : <div className="growth-preview-empty"><span>⬡</span><strong>{growthOptions.size > 0 ? "在地图或建议中选择一格" : "暂无可开发地块"}</strong><p>{growthOptions.size > 0 ? "确认前会显示产出与边界变化。" : "跳过后人口仍 +1，边界与设施保持不变。"}</p></div>}</section>
+            <div className="growth-actions"><button onClick={() => setGrowthCandidate(null)}>重新选择</button><button className="confirm" onClick={confirmGrowthSelection} disabled={!growthCandidate} data-testid="confirm-growth">{growthCandidate ? "确认开发并外推边界" : "请先选择地块"}</button><button className="growth-skip" onClick={skipGrowthSelection} data-testid="skip-growth"><strong>跳过本次地块开发</strong><small>人口仍 +1 · 边界不变</small></button></div>
           </> : <div className="growth-rule-list"><p><b>1</b><span><strong>粮食推动成长</strong>成长槽满后获得人口。</span></p><p><b>2</b><span><strong>选择边界内相邻格</strong>开发核心必须连续。</span></p><p><b>3</b><span><strong>边界自动外推一圈</strong>农场、矿山或城区都会成为新核心。</span></p></div>}
         </div>
       </aside>

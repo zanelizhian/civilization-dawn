@@ -2131,6 +2131,7 @@ button { font: inherit; }
 .growth-steps span.active { color: #f0d274; }
 .growth-steps span.done { color: #7edbd1; }
 .growth-instruction { margin: 0; padding: 9px 10px; border-left: 3px solid #49bdb5; color: #b2c8c5; background: rgba(49,145,139,.1); font-size: 8px; line-height: 1.5; }
+.growth-instruction.empty { border-left-color: #d6b958; color: #eedc9d; background: rgba(193,151,43,.11); }
 .growth-recommendations { display: grid; gap: 6px; }
 .growth-recommendations > header { display: flex; justify-content: space-between; color: #dbe9e6; font-size: 9px; }
 .growth-recommendations > header span { color: #79cfc6; font-size: 8px; }
@@ -2158,6 +2159,10 @@ button { font: inherit; }
 .growth-actions { display: grid; grid-template-columns: 1fr 1.6fr; gap: 8px; position: sticky; bottom: -70px; margin: auto -16px -82px; padding: 12px 16px max(15px,env(safe-area-inset-bottom)); border-top: 1px solid rgba(255,255,255,.1); background: rgba(12,25,26,.97); }
 .growth-actions button { min-height: 38px; border: 1px solid rgba(255,255,255,.18); border-radius: 8px; color: #b9cac7; background: rgba(255,255,255,.05); cursor: pointer; font-size: 9px; font-weight: 900; }
 .growth-actions button.confirm { border-color: #63cfc5; color: #092f31; background: linear-gradient(135deg,#8ce2d7,#4ebdb5); }
+.growth-actions button.growth-skip { min-height: 34px; grid-column: 1 / -1; display: flex; align-items: center; justify-content: space-between; gap: 10px; padding-inline: 11px; border-color: rgba(214,185,88,.34); color: #e8d897; background: rgba(193,151,43,.08); }
+.growth-actions button.growth-skip:hover { border-color: rgba(230,200,98,.62); color: #fff0b8; background: rgba(193,151,43,.15); }
+.growth-actions button.growth-skip strong { font-size: 9px; }
+.growth-actions button.growth-skip small { color: #aebcb9; font-size: 7px; font-weight: 700; }
 .growth-actions button:disabled { opacity: .35; cursor: not-allowed; }
 .growth-rule-list { display: grid; gap: 8px; }
 .growth-rule-list p { display: grid; grid-template-columns: 30px 1fr; align-items: center; gap: 10px; margin: 0; padding: 11px; border: 1px solid rgba(255,255,255,.09); border-radius: 9px; color: #94aaa7; background: rgba(255,255,255,.035); font-size: 8px; }

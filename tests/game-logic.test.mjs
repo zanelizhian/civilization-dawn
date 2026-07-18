@@ -21,6 +21,7 @@ export {
   playerOwnedTilesForCities,
   settlementError,
   foundCity,
+  skipCityGrowth,
   resolvePlayerEconomyRound,
   declareWar,
   resolvePlayerAttack,
@@ -59,6 +60,7 @@ const {
   playerOwnedTilesForCities,
   settlementError,
   foundCity,
+  skipCityGrowth,
   resolvePlayerEconomyRound,
   declareWar,
   resolvePlayerAttack,
@@ -236,6 +238,52 @@ test("settlers reject illegal sites, found a legal second city, and are consumed
   const rejected = foundCity(illegalSettler, "settler-test");
   assert.equal(rejected.cities.length, 1);
   assert.equal(rejected.units.some((unit) => unit.id === "settler-test"), true);
+});
+
+test("skipping growth adds population without developing land or moving borders", () => {
+  const initial = createInitialState();
+  const cityId = initial.cities[0].id;
+  const before = {
+    ...initial,
+    cities: initial.cities.map((city) => city.id === cityId ? { ...city, population: 3, food: 0, growthPending: 2 } : city),
+  };
+  const geography = {
+    ruralTiles: [...before.cities[0].ruralTiles],
+    ownedTiles: [...before.ownedTiles],
+    builtImprovements: { ...before.builtImprovements },
+    discovered: new Set(before.discovered),
+  };
+
+  const once = skipCityGrowth(before, cityId);
+  assert.equal(once.cities[0].population, 4);
+  assert.equal(once.cities[0].growthPending, 1);
+
+  const twice = skipCityGrowth(once, cityId);
+  assert.equal(twice.cities[0].population, 5);
+  assert.equal(twice.cities[0].growthPending, 0);
+  assert.deepEqual(twice.cities[0].ruralTiles, geography.ruralTiles);
+  assert.deepEqual(twice.ownedTiles, geography.ownedTiles);
+  assert.deepEqual(twice.builtImprovements, geography.builtImprovements);
+  assert.deepEqual(twice.discovered, geography.discovered);
+  assert.match(twice.message, /跳过/);
+});
+
+test("skipped growth immediately queues chained growth from stored food", () => {
+  const initial = createInitialState();
+  const cityId = initial.cities[0].id;
+  const ready = {
+    ...initial,
+    cities: initial.cities.map((city) => city.id === cityId ? { ...city, population: 3, food: 26, growthPending: 1 } : city),
+  };
+
+  const chained = skipCityGrowth(ready, cityId);
+  assert.equal(chained.cities[0].population, 4);
+  assert.equal(chained.cities[0].food, 0);
+  assert.equal(chained.cities[0].growthPending, 1);
+
+  const completed = skipCityGrowth(chained, cityId);
+  assert.equal(completed.cities[0].population, 5);
+  assert.equal(completed.cities[0].growthPending, 0);
 });
 
 test("two cities advance independent production queues and deploy their own units", () => {
