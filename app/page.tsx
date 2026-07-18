@@ -587,6 +587,113 @@ function movementRange(start: Position, remainingMoves: number, enemyIds: Readon
   return reachable;
 }
 
+type UnitMovementStatus = "arrived" | "advanced" | "blocked" | "no-route";
+type UnitMovementPlan = { destination: Position; cost: number; discovered: Set<string>; status: UnitMovementStatus };
+
+function terrainBlocksLandMovement(pos: Position) {
+  const terrain = terrainAt(pos);
+  return terrain === "water" || terrain === "mountain";
+}
+
+function shortestKnownPath(start: Position, target: Position, blockedIds: ReadonlySet<string>, knownTiles: ReadonlySet<string>) {
+  const startId = idFor(start);
+  const targetId = idFor(target);
+  if (startId === targetId) return [];
+  const previous = new Map<string, string | null>([[startId, null]]);
+  const queue: Position[] = [start];
+  let reached = false;
+
+  for (let head = 0; head < queue.length && !reached; head += 1) {
+    const current = queue[head];
+    for (const next of neighbors(current)) {
+      const nextId = idFor(next);
+      if (previous.has(nextId) || blockedIds.has(nextId) || (knownTiles.has(nextId) && terrainBlocksLandMovement(next))) continue;
+      previous.set(nextId, idFor(current));
+      if (nextId === targetId) { reached = true; break; }
+      queue.push(next);
+    }
+  }
+  if (!reached) return null;
+
+  const path: Position[] = [];
+  let cursor = targetId;
+  while (cursor !== startId) {
+    path.unshift(posForId(cursor));
+    const parent = previous.get(cursor);
+    if (!parent) return null;
+    cursor = parent;
+  }
+  return path;
+}
+
+function planUnitMovement(start: Position, target: Position, remainingMoves: number, blockedIds: ReadonlySet<string>, discoveredTiles: ReadonlySet<string>, visionRadius: number): UnitMovementPlan {
+  const budget = Math.max(0, Math.floor(remainingMoves));
+  const targetId = idFor(target);
+  let destination = start;
+  let cost = 0;
+  let discovered = new Set(discoveredTiles);
+
+  while (cost < budget) {
+    discovered = reveal(discovered, destination, Math.max(1, visionRadius));
+    if (idFor(destination) === targetId) return { destination, cost, discovered, status: "arrived" };
+    if (blockedIds.has(targetId) || (discovered.has(targetId) && terrainBlocksLandMovement(target))) {
+      return { destination, cost, discovered, status: "blocked" };
+    }
+    const path = shortestKnownPath(destination, target, blockedIds, discovered);
+    if (!path?.length) return { destination, cost, discovered, status: "no-route" };
+    destination = path[0];
+    cost += 1;
+  }
+
+  discovered = reveal(discovered, destination, Math.max(1, visionRadius));
+  if (idFor(destination) === targetId) return { destination, cost, discovered, status: "arrived" };
+  if (blockedIds.has(targetId) || (discovered.has(targetId) && terrainBlocksLandMovement(target))) {
+    return { destination, cost, discovered, status: "blocked" };
+  }
+  return { destination, cost, discovered, status: cost > 0 ? "advanced" : "no-route" };
+}
+
+function resolvePlayerMovement(state: GameState, unitId: string, target: Position, blockedIds: ReadonlySet<string>): GameState {
+  const activeUnit = state.units.find((unit) => unit.id === unitId);
+  if (!activeUnit) return state;
+  const targetId = idFor(target);
+  const unitName = UNIT_INFO[activeUnit.type].name;
+  if (activeUnit.moves <= 0) {
+    const message = `${unitName}本回合移动力已用尽。`;
+    return { ...state, selectedUnitId: activeUnit.id, selectedTile: targetId, message };
+  }
+
+  const plan = planUnitMovement(activeUnit.pos, target, activeUnit.moves, blockedIds, state.discovered, activeUnit.type === "scout" ? 2 : 1);
+  const found = plan.discovered.size - state.discovered.size;
+  const points = Math.min(2, found);
+  const targetKnown = plan.discovered.has(targetId);
+  const targetTerrain = terrainAt(target);
+  const destinationTerrain = TERRAIN_INFO[terrainAt(plan.destination)].label;
+  let entry: string;
+  if (plan.status === "arrived") {
+    entry = plan.cost > 0 ? `${unitName}沿路径移动 ${plan.cost} 格，到达${TERRAIN_INFO[targetTerrain].label}。` : `${unitName}已经位于目标地块。`;
+  } else if (plan.status === "blocked") {
+    const reason = targetKnown && terrainBlocksLandMovement(target) ? `${TERRAIN_INFO[targetTerrain].label}无法通行` : "目标地块已被占用";
+    entry = plan.cost > 0 ? `${unitName}向目标移动 ${plan.cost} 格；侦察确认${reason}，已在${destinationTerrain}停下。` : `${reason}；${unitName}保持原位。`;
+  } else if (plan.status === "advanced") {
+    entry = `${unitName}沿目标路径前进 ${plan.cost} 格；${targetKnown ? "目标超出本回合移动范围" : "目标仍在战争迷雾中"}。`;
+  } else {
+    entry = plan.cost > 0 ? `${unitName}前进 ${plan.cost} 格后发现没有可通行路线，已在${destinationTerrain}停下。` : `${unitName}找不到通往目标的已知路线。`;
+  }
+  if (found > 0) entry += ` 新发现 ${found} 个地块，获得 ${points} 伟人点。`;
+
+  return {
+    ...state,
+    units: state.units.map((unit) => unit.id === activeUnit.id ? { ...unit, pos: plan.destination, moves: unit.moves - plan.cost } : unit),
+    greatPoints: state.greatPoints + points,
+    discovered: plan.discovered,
+    selectedUnitId: activeUnit.id,
+    selectedTile: targetId,
+    message: entry,
+    log: addLog(state.log, entry),
+  };
+}
+
 function reveal(discovered: Set<string>, center: Position, radius = 1) {
   const next = new Set(discovered);
   const frontier: Position[] = [center];
@@ -2309,7 +2416,6 @@ export default function Home() {
       const tileId = idFor(pos);
       const terrain = terrainAt(pos);
       const known = prev.discovered.has(tileId);
-      const terrainBlocked = terrain === "water" || terrain === "mountain";
       const cityBlocked = Boolean(clickedRival);
       const occupiedByPatrol = rivalPatrolsFor(prev).find((patrol) => tileId === idFor(patrol.pos)) ?? null;
       const rivalOccupied = Boolean(occupiedByPatrol);
@@ -2321,30 +2427,11 @@ export default function Home() {
       }
       prev.units.forEach((unit) => { if (unit.id !== activeUnit?.id) blockers.add(idFor(unit.pos)); });
       const friendlyOccupied = prev.units.some((unit) => unit.id !== activeUnit?.id && idFor(unit.pos) === tileId);
-      const moveCosts = activeUnit ? movementRange(activeUnit.pos, activeUnit.moves, blockers, prev.discovered) : new Map<string, number>();
-      const moveCost = moveCosts.get(tileId);
-      if (activeUnit && moveCost !== undefined && !terrainBlocked && !cityBlocked && !rivalOccupied && !friendlyOccupied) {
-        const discovered = reveal(prev.discovered, pos, activeUnit.type === "scout" ? 2 : 1);
-        const found = discovered.size - prev.discovered.size;
-        const points = Math.min(2, found);
-        const unitName = UNIT_INFO[activeUnit.type].name;
-        const entry = found > 0
-          ? `${unitName}发现了 ${found} 个新地块，获得 ${points} 伟人点。`
-          : `${unitName}移动 ${moveCost} 格，到达${TERRAIN_INFO[terrain].label}。`;
-        return {
-          ...prev,
-          units: prev.units.map((unit) => unit.id === activeUnit.id ? { ...unit, pos, moves: unit.moves - moveCost } : unit),
-          greatPoints: prev.greatPoints + points,
-          discovered,
-          selectedTile: tileId,
-          message: entry,
-          log: addLog(prev.log, entry),
-        };
-      }
+      if (activeUnit && !cityBlocked && !rivalOccupied && !friendlyOccupied) return resolvePlayerMovement(prev, activeUnit.id, pos, blockers);
       return {
         ...prev,
         selectedTile: tileId,
-        selectedUnitId: null,
+        selectedUnitId: activeUnit?.id ?? null,
         message: !known
           ? "这片区域仍在战争迷雾中；请派单位靠近后侦察。"
           : cityBlocked
@@ -2353,7 +2440,7 @@ export default function Home() {
               ? visibleTiles.has(tileId) ? `${occupiedByPatrol!.rival.name}战士正在此处，${prev.wars[occupiedByPatrol!.rival.id] === "war" ? "选中相邻战斗单位即可攻击" : "宣战后才可攻击"}。` : "战争迷雾中有单位阻挡，移动中止。"
               : friendlyOccupied
                 ? "己方单位已占用这块地。"
-              : terrainBlocked ? `${TERRAIN_INFO[terrain].label}目前无法通行。` : `已查看${TERRAIN_INFO[terrain].label}地块。`,
+              : `已查看${TERRAIN_INFO[terrain].label}地块。`,
       };
     });
   };

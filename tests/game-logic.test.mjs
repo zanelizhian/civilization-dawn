@@ -22,6 +22,8 @@ export {
   settlementError,
   foundCity,
   skipCityGrowth,
+  planUnitMovement,
+  resolvePlayerMovement,
   resolvePlayerEconomyRound,
   declareWar,
   resolvePlayerAttack,
@@ -61,6 +63,8 @@ const {
   settlementError,
   foundCity,
   skipCityGrowth,
+  planUnitMovement,
+  resolvePlayerMovement,
   resolvePlayerEconomyRound,
   declareWar,
   resolvePlayerAttack,
@@ -284,6 +288,72 @@ test("skipped growth immediately queues chained growth from stored food", () => 
   const completed = skipCityGrowth(chained, cityId);
   assert.equal(completed.cities[0].population, 5);
   assert.equal(completed.cities[0].growthPending, 0);
+});
+
+test("known impassable terrain cancels movement without deselecting the unit", () => {
+  const initial = discoverWorld(createInitialState());
+  const unit = initial.units[0];
+  const start = { col: 4, row: 4 };
+  const target = { col: 6, row: 5 };
+  assert.equal(terrainAt(target), "water");
+  const ready = { ...initial, units: initial.units.map((candidate) => candidate.id === unit.id ? { ...candidate, pos: start, moves: 3 } : candidate), selectedUnitId: unit.id };
+
+  const after = resolvePlayerMovement(ready, unit.id, target, new Set());
+  const moved = after.units.find((candidate) => candidate.id === unit.id);
+  assert.deepEqual(moved.pos, start);
+  assert.equal(moved.moves, 3);
+  assert.equal(after.selectedUnitId, unit.id);
+  assert.equal(after.selectedTile, idFor(target));
+  assert.match(after.message, /浅海无法通行/);
+});
+
+test("an unknown impassable target is approached until it becomes visible", () => {
+  const initial = createInitialState();
+  const unit = initial.units[0];
+  const start = { col: 4, row: 4 };
+  const target = { col: 6, row: 5 };
+  const known = new Set([idFor(start), ...adjacentPositions(start).filter(inBounds).map(idFor)]);
+  assert.equal(known.has(idFor(target)), false);
+  const ready = { ...initial, discovered: known, units: initial.units.map((candidate) => candidate.id === unit.id ? { ...candidate, pos: start, moves: 3 } : candidate), selectedUnitId: unit.id };
+
+  const after = resolvePlayerMovement(ready, unit.id, target, new Set());
+  const moved = after.units.find((candidate) => candidate.id === unit.id);
+  assert.deepEqual(moved.pos, { col: 5, row: 4 });
+  assert.equal(moved.moves, 2);
+  assert.ok(after.discovered.has(idFor(target)));
+  assert.equal(after.selectedUnitId, unit.id);
+  assert.match(after.message, /移动 1 格.*浅海无法通行/);
+});
+
+test("movement replans around newly revealed obstacles and advances toward distant targets", () => {
+  const start = { col: 4, row: 4 };
+  const target = { col: 8, row: 5 };
+  const hiddenWater = { col: 6, row: 5 };
+  const known = new Set([idFor(start), ...adjacentPositions(start).filter(inBounds).map(idFor)]);
+  assert.equal(terrainAt(target), "forest");
+  assert.equal(terrainAt(hiddenWater), "water");
+  const plan = planUnitMovement(start, target, 6, new Set(), known, 1);
+
+  assert.equal(plan.status, "arrived");
+  assert.deepEqual(plan.destination, target);
+  assert.ok(plan.discovered.has(idFor(hiddenWater)));
+  assert.ok(plan.cost <= 6);
+
+  const shortPlan = planUnitMovement(start, target, 2, new Set(), known, 1);
+  assert.equal(shortPlan.status, "advanced");
+  assert.equal(shortPlan.cost, 2);
+  assert.ok(hexDistance(shortPlan.destination, target) < hexDistance(start, target));
+});
+
+test("pathing can leave the legacy unit's impassable starting tile", () => {
+  const start = { col: 6, row: 5 };
+  const target = { col: 7, row: 5 };
+  assert.equal(terrainAt(start), "water");
+  assert.equal(terrainAt(target), "desert");
+  const plan = planUnitMovement(start, target, 1, new Set(), new Set(allTileIds()), 1);
+  assert.equal(plan.status, "arrived");
+  assert.deepEqual(plan.destination, target);
+  assert.equal(plan.cost, 1);
 });
 
 test("two cities advance independent production queues and deploy their own units", () => {
