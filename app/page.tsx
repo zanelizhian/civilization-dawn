@@ -40,9 +40,18 @@ type GameState = {
   result: "win" | "lose" | null;
 };
 
+type SavedGameState = Omit<GameState, "discovered"> & { discovered: string[] };
+type SaveEnvelope = { version: 1; savedAt: string; game: SavedGameState };
+type SaveReadResult =
+  | { ok: true; savedAt: string; game: GameState }
+  | { ok: false; reason: "missing" | "version" | "corrupt" };
+type SaveMeta = { savedAt: string; turn: number };
+
 const COLS = 9;
 const ROWS = 6;
 const CITY_POS = { col: 4, row: 2 };
+const SAVE_KEY = "civilization-dawn.single-slot";
+const SAVE_VERSION = 1 as const;
 
 const TERRAIN: Terrain[] = [
   "water", "desert", "forest", "hills", "grass", "mountain", "water", "desert", "forest",
@@ -93,6 +102,16 @@ const idFor = ({ col, row }: Position) => `${col}-${row}`;
 const posForId = (id: string): Position => ({ col: Number(id.split("-")[0]), row: Number(id.split("-")[1]) });
 const terrainAt = ({ col, row }: Position) => TERRAIN[row * COLS + col];
 const inBounds = ({ col, row }: Position) => col >= 0 && col < COLS && row >= 0 && row < ROWS;
+
+function hexGeometry({ col, row }: Position) {
+  const x = col * 70;
+  const y = row * 82 + (col % 2) * 41;
+  return {
+    cx: x + 46,
+    cy: y + 40,
+    points: `${x + 23},${y} ${x + 69},${y} ${x + 92},${y + 40} ${x + 69},${y + 80} ${x + 23},${y + 80} ${x},${y + 40}`,
+  };
+}
 
 function neighbors(pos: Position) {
   const offsets = pos.col % 2
@@ -252,6 +271,101 @@ function createInitialState(): GameState {
   };
 }
 
+const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value);
+const isNonNegativeInteger = (value: unknown) => Number.isSafeInteger(value) && Number(value) >= 0;
+const isTileId = (value: unknown): value is string => typeof value === "string" && /^[0-8]-[0-5]$/.test(value);
+const isPosition = (value: unknown): value is Position => {
+  if (!isRecord(value) || !Number.isInteger(value.col) || !Number.isInteger(value.row)) return false;
+  return inBounds({ col: Number(value.col), row: Number(value.row) });
+};
+const isTechId = (value: unknown): value is TechId => typeof value === "string" && TECHS.some((tech) => tech.id === value);
+const isProductionId = (value: unknown): value is ProductionId => typeof value === "string" && PRODUCTIONS.some((production) => production.id === value);
+
+function makeLocalSave(game: GameState): SaveEnvelope {
+  return {
+    version: SAVE_VERSION,
+    savedAt: new Date().toISOString(),
+    game: { ...game, discovered: Array.from(game.discovered) },
+  };
+}
+
+function readLocalSave(raw: string | null): SaveReadResult {
+  if (!raw) return { ok: false, reason: "missing" };
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return { ok: false, reason: "corrupt" };
+  }
+  if (!isRecord(parsed)) return { ok: false, reason: "corrupt" };
+  if (parsed.version !== SAVE_VERSION) return { ok: false, reason: "version" };
+  if (typeof parsed.savedAt !== "string" || Number.isNaN(Date.parse(parsed.savedAt)) || !isRecord(parsed.game)) return { ok: false, reason: "corrupt" };
+
+  const value = parsed.game;
+  const integerFields = ["turn", "gold", "science", "culture", "greatPoints", "population", "food", "techProgress", "unitMoves", "brazilInfluence", "footballTurns"] as const;
+  if (integerFields.some((field) => !isNonNegativeInteger(value[field])) || Number(value.turn) < 1 || Number(value.population) < 1) return { ok: false, reason: "corrupt" };
+  if (!isPosition(value.unitPos) || !isPosition(value.brazilPos)) return { ok: false, reason: "corrupt" };
+  if (value.activeTech !== null && !isTechId(value.activeTech)) return { ok: false, reason: "corrupt" };
+  if (value.activeProduction !== null && !isProductionId(value.activeProduction)) return { ok: false, reason: "corrupt" };
+  if (!Array.isArray(value.completedTechs) || !value.completedTechs.every(isTechId)) return { ok: false, reason: "corrupt" };
+  if (!Array.isArray(value.completedBuildings) || !value.completedBuildings.every(isProductionId)) return { ok: false, reason: "corrupt" };
+  if (!Array.isArray(value.discovered) || !value.discovered.every(isTileId)) return { ok: false, reason: "corrupt" };
+  if (value.selectedTile !== null && !isTileId(value.selectedTile)) return { ok: false, reason: "corrupt" };
+  if (typeof value.selectedUnit !== "boolean" || typeof value.messiRecruited !== "boolean" || typeof value.messiAbilityUsed !== "boolean") return { ok: false, reason: "corrupt" };
+  if (typeof value.message !== "string" || !Array.isArray(value.log) || !value.log.every((entry) => typeof entry === "string")) return { ok: false, reason: "corrupt" };
+  if (value.result !== null && value.result !== "win" && value.result !== "lose") return { ok: false, reason: "corrupt" };
+  const savedProductionProgress = value.productionProgress;
+  const savedBuildingPlacements = value.buildingPlacements;
+  if (!isRecord(savedProductionProgress) || PRODUCTIONS.some((production) => !isNonNegativeInteger(savedProductionProgress[production.id]))) return { ok: false, reason: "corrupt" };
+  if (!isRecord(savedBuildingPlacements) || Object.keys(savedBuildingPlacements).some((key) => !isProductionId(key))) return { ok: false, reason: "corrupt" };
+
+  const buildingPlacements: Partial<Record<ProductionId, string>> = {};
+  const occupiedTiles = new Set<string>();
+  for (const production of PRODUCTIONS) {
+    const tileId = savedBuildingPlacements[production.id];
+    if (tileId === undefined) continue;
+    if (!isTileId(tileId) || occupiedTiles.has(tileId)) return { ok: false, reason: "corrupt" };
+    buildingPlacements[production.id] = tileId;
+    occupiedTiles.add(tileId);
+  }
+
+  const productionProgress = Object.fromEntries(PRODUCTIONS.map((production) => [production.id, Number(savedProductionProgress[production.id])])) as Record<ProductionId, number>;
+  const game: GameState = {
+    turn: Number(value.turn),
+    gold: Number(value.gold),
+    science: Number(value.science),
+    culture: Number(value.culture),
+    greatPoints: Number(value.greatPoints),
+    population: Number(value.population),
+    food: Number(value.food),
+    activeTech: value.activeTech as TechId | null,
+    techProgress: Number(value.techProgress),
+    completedTechs: Array.from(new Set(value.completedTechs as TechId[])),
+    activeProduction: value.activeProduction as ProductionId | null,
+    productionProgress,
+    completedBuildings: Array.from(new Set(value.completedBuildings as ProductionId[])),
+    buildingPlacements,
+    unitPos: value.unitPos,
+    unitMoves: Number(value.unitMoves),
+    brazilPos: value.brazilPos,
+    brazilInfluence: Number(value.brazilInfluence),
+    discovered: new Set(value.discovered as string[]),
+    selectedUnit: value.selectedUnit,
+    selectedTile: value.selectedTile as string | null,
+    messiRecruited: value.messiRecruited,
+    messiAbilityUsed: value.messiAbilityUsed,
+    footballTurns: Number(value.footballTurns),
+    message: value.message,
+    log: (value.log as string[]).slice(0, 4),
+    result: value.result as "win" | "lose" | null,
+  };
+  return { ok: true, savedAt: parsed.savedAt, game };
+}
+
+function formatSaveTime(savedAt: string) {
+  return new Intl.DateTimeFormat("zh-CN", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" }).format(new Date(savedAt));
+}
+
 function nextBrazilPosition(state: GameState) {
   const candidates = neighbors(state.brazilPos).filter((pos) => {
     const terrain = terrainAt(pos);
@@ -271,6 +385,9 @@ export default function Home() {
   const [productionReminderBypassed, setProductionReminderBypassed] = useState(false);
   const [aiThinking, setAiThinking] = useState(false);
   const [showYields, setShowYields] = useState(false);
+  const [saveMeta, setSaveMeta] = useState<SaveMeta | null>(null);
+  const [saveNotice, setSaveNotice] = useState("仅保存在当前设备的浏览器中");
+  const [pendingSystemAction, setPendingSystemAction] = useState<"load" | "restart" | null>(null);
   const aiLockRef = useRef(false);
   const aiTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -359,6 +476,21 @@ export default function Home() {
   ];
 
   const addLog = (log: string[], entry: string) => [entry, ...log].slice(0, 4);
+
+  const stopTransientFlow = () => {
+    if (aiTimerRef.current) clearTimeout(aiTimerRef.current);
+    aiTimerRef.current = null;
+    aiLockRef.current = false;
+    setAiThinking(false);
+    setTechPickerOpen(false);
+    setProductionDrawerOpen(false);
+    setPlacingProduction(null);
+    setPlacementCandidate(null);
+    setHoveredPlacementTile(null);
+    setPlacementDetailed(false);
+    setProductionReminderBypassed(false);
+    setPendingSystemAction(null);
+  };
 
   const cancelProductionPlacement = (keepDrawerOpen = true) => {
     setPlacingProduction(null);
@@ -679,11 +811,29 @@ export default function Home() {
   }, [aiThinking, endTurn, game.activeProduction, game.completedBuildings.length, game.result, placingProduction, productionDrawerOpen, productionReminderBypassed, techPickerOpen]);
 
   useEffect(() => {
+    const refreshSaveMeta = () => {
+      try {
+        const saved = readLocalSave(window.localStorage.getItem(SAVE_KEY));
+        setSaveMeta(saved.ok ? { savedAt: saved.savedAt, turn: saved.game.turn } : null);
+        if (!saved.ok && saved.reason !== "missing") setSaveNotice(saved.reason === "version" ? "临时存档版本不兼容" : "临时存档已损坏");
+      } catch {
+        setSaveMeta(null);
+        setSaveNotice("当前浏览器无法使用本地存档");
+      }
+    };
+    refreshSaveMeta();
+    window.addEventListener("storage", refreshSaveMeta);
+    return () => window.removeEventListener("storage", refreshSaveMeta);
+  }, []);
+
+  useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       const target = event.target as HTMLElement;
       if (event.key === "Enter" && !["BUTTON", "INPUT", "SELECT", "TEXTAREA"].includes(target.tagName)) requestEndTurn();
       if (event.key === "Escape") {
-        if (placingProduction) {
+        if (pendingSystemAction) {
+          setPendingSystemAction(null);
+        } else if (placingProduction) {
           setPlacingProduction(null);
           setPlacementCandidate(null);
           setHoveredPlacementTile(null);
@@ -698,25 +848,58 @@ export default function Home() {
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [placingProduction, productionDrawerOpen, requestEndTurn]);
+  }, [pendingSystemAction, placingProduction, productionDrawerOpen, requestEndTurn]);
 
   useEffect(() => () => {
     if (aiTimerRef.current) clearTimeout(aiTimerRef.current);
   }, []);
 
   const resetGame = () => {
-    if (aiTimerRef.current) clearTimeout(aiTimerRef.current);
-    aiTimerRef.current = null;
-    aiLockRef.current = false;
-    setAiThinking(false);
-    setTechPickerOpen(false);
-    setProductionDrawerOpen(false);
-    setPlacingProduction(null);
-    setPlacementCandidate(null);
-    setHoveredPlacementTile(null);
-    setPlacementDetailed(false);
-    setProductionReminderBypassed(false);
+    stopTransientFlow();
     setGame(createInitialState());
+    setSaveNotice(saveMeta ? "已重新开始；原临时存档仍可读取" : "已重新开始新游戏");
+  };
+
+  const saveGame = () => {
+    if (aiThinking || aiLockRef.current || placingProduction) {
+      setSaveNotice(placingProduction ? "请先确认或取消建筑选址" : "请等待巴西行动结束");
+      return;
+    }
+    try {
+      const payload = makeLocalSave(game);
+      window.localStorage.setItem(SAVE_KEY, JSON.stringify(payload));
+      setSaveMeta({ savedAt: payload.savedAt, turn: game.turn });
+      setSaveNotice(`第 ${game.turn} 回合已暂时保存`);
+      setPendingSystemAction(null);
+      setGame((prev) => ({ ...prev, message: `游戏已保存到当前浏览器：第 ${prev.turn} 回合。` }));
+    } catch {
+      setSaveNotice("保存失败：浏览器存储不可用");
+    }
+  };
+
+  const loadGame = () => {
+    let saved: SaveReadResult;
+    try {
+      saved = readLocalSave(window.localStorage.getItem(SAVE_KEY));
+    } catch {
+      setSaveNotice("读取失败：浏览器存储不可用");
+      return;
+    }
+    if (!saved.ok) {
+      setSaveMeta(null);
+      setSaveNotice(saved.reason === "version" ? "临时存档版本不兼容" : saved.reason === "missing" ? "当前还没有临时存档" : "临时存档已损坏");
+      setPendingSystemAction(null);
+      return;
+    }
+    stopTransientFlow();
+    setGame({ ...saved.game, message: `已读取第 ${saved.game.turn} 回合的临时存档。` });
+    setSaveMeta({ savedAt: saved.savedAt, turn: saved.game.turn });
+    setSaveNotice(`已恢复第 ${saved.game.turn} 回合`);
+  };
+
+  const confirmSystemAction = () => {
+    if (pendingSystemAction === "load") loadGame();
+    if (pendingSystemAction === "restart") resetGame();
   };
 
   const techPercent = activeTech ? Math.min(100, (game.techProgress / activeTech.cost) * 100) : 0;
@@ -730,6 +913,12 @@ export default function Home() {
   const messiStyle = { left: cityTileLeft + 67, top: cityTileTop + 18 };
   const unitStyle = { left: game.unitPos.col * 70 + 22, top: game.unitPos.row * 82 + (game.unitPos.col % 2) * 41 + 15 };
   const brazilStyle = { left: game.brazilPos.col * 70 + 22, top: game.brazilPos.row * 82 + (game.brazilPos.col % 2) * 41 + 15 };
+  const miniCityGeometry = hexGeometry(CITY_POS);
+  const miniUnitGeometry = hexGeometry(game.unitPos);
+  const miniBrazilGeometry = hexGeometry(game.brazilPos);
+  const selectedMiniGeometry = game.selectedTile && game.discovered.has(game.selectedTile) ? hexGeometry(posForId(game.selectedTile)) : null;
+  const rivalVisibleOnMiniMap = game.discovered.has(idFor(game.brazilPos));
+  const savedAtLabel = saveMeta ? formatSaveTime(saveMeta.savedAt) : "暂无临时存档";
 
   const tiles = useMemo(() => TERRAIN.map((terrain, index) => ({ terrain, col: index % COLS, row: Math.floor(index / COLS) })), []);
 
@@ -923,13 +1112,43 @@ export default function Home() {
           </section>
 
           <section className="paper-card world-card">
-            <div className="card-kicker">已知世界 · 巴西影响力 {game.brazilInfluence}/100</div>
-            <div className="mini-map" aria-hidden="true">
-              <i /><i /><i /><i /><i /><i /><i /><i /><i /><i /><i /><i />
-              <span className="mini-player" /><span className="mini-rival" />
+            <div className="world-map-heading">
+              <div><div className="card-kicker">战略小地图</div><small>已探索 {revealedCount}/{COLS * ROWS} 个地块</small></div>
+              <b>巴西影响力 {game.brazilInfluence}/100</b>
             </div>
+            <div className="influence-track" role="progressbar" aria-label="巴西影响力" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.min(100, game.brazilInfluence)}><i style={{ width: `${Math.min(100, game.brazilInfluence)}%` }} /></div>
+            <div className="strategic-mini-map">
+              <svg viewBox="-4 -4 660 539" role="img" aria-label={`战略小地图：已探索 ${revealedCount} 个地块；显示布宜诺斯艾利斯、高乔侦骑${rivalVisibleOnMiniMap ? "和已发现的巴西斥候" : "，巴西斥候目前不在视野内"}`}>
+                <defs>
+                  <pattern id="mini-fog-pattern" width="20" height="20" patternUnits="userSpaceOnUse" patternTransform="rotate(35)"><rect width="20" height="20" fill="#59615e" /><line x1="0" y1="0" x2="0" y2="20" stroke="#737a76" strokeWidth="6" /></pattern>
+                </defs>
+                {tiles.map(({ terrain, col, row }) => {
+                  const pos = { col, row };
+                  const tileId = idFor(pos);
+                  const geometry = hexGeometry(pos);
+                  const discovered = game.discovered.has(tileId);
+                  return <polygon key={`mini-${tileId}`} points={geometry.points} className={`mini-hex mini-${terrain} ${discovered ? "revealed" : "fog"} ${discovered && isArgentineTerritory(pos) ? "argentine-territory" : ""} ${discovered && isBrazilianTerritory(pos) ? "brazilian-territory" : ""}`} />;
+                })}
+                {selectedMiniGeometry && <polygon points={selectedMiniGeometry.points} className="mini-selected" />}
+                <g className="mini-token mini-city-token" transform={`translate(${miniCityGeometry.cx} ${miniCityGeometry.cy})`}><circle r="20" /><text textAnchor="middle" dominantBaseline="central">★</text></g>
+                <g className="mini-token mini-unit-token" transform={`translate(${miniUnitGeometry.cx} ${miniUnitGeometry.cy})`}><circle r="18" /><text textAnchor="middle" dominantBaseline="central">高</text></g>
+                {rivalVisibleOnMiniMap && <g className="mini-token mini-rival-token" transform={`translate(${miniBrazilGeometry.cx} ${miniBrazilGeometry.cy})`}><circle r="18" /><text textAnchor="middle" dominantBaseline="central">巴</text></g>}
+              </svg>
+            </div>
+            <div className="mini-map-legend" aria-hidden="true"><span><i className="argentina" />阿根廷领土</span><span><i className="brazil" />巴西领土</span><span><i className="fog" />未探索</span></div>
+            <p className="world-threat-copy">这是主棋盘的缩略图；巴西影响力达到 100 时，阿根廷将失败。</p>
             <div className="diplomacy-row"><span><b className="avatar argentina">A</b>阿根廷</span><em>你</em></div>
             <div className="diplomacy-row"><span><b className="avatar brazil">B</b>巴西</span><em>{aiThinking ? "行动中" : "中立"}</em></div>
+          </section>
+
+          <section className="paper-card save-card" aria-label="本地临时存档">
+            <div className="save-card-heading"><div><div className="card-kicker">临时存档 · 单槽</div><strong>{saveMeta ? `第 ${saveMeta.turn} 回合` : "空存档槽"}</strong></div><small>{savedAtLabel}</small></div>
+            {pendingSystemAction ? (
+              <div className="save-confirm" role="alert"><p>{pendingSystemAction === "load" ? "读取会覆盖当前未保存的进度。" : "确定重新开始？临时存档会保留。"}</p><div><button onClick={() => setPendingSystemAction(null)}>取消</button><button className="confirm" onClick={confirmSystemAction} data-testid={`confirm-${pendingSystemAction}-game`}>{pendingSystemAction === "load" ? "确认读取" : "确认重开"}</button></div></div>
+            ) : (
+              <div className="save-actions"><button onClick={saveGame} disabled={aiThinking || Boolean(placingProduction)} data-testid="save-game"><b>▣</b><span>暂时保存</span></button><button onClick={() => setPendingSystemAction("load")} disabled={!saveMeta || aiThinking} data-testid="load-game"><b>↥</b><span>读取</span></button><button onClick={() => setPendingSystemAction("restart")} disabled={aiThinking} data-testid="restart-game"><b>↻</b><span>重新开始</span></button></div>
+            )}
+            <p className="save-note">{saveNotice}；清除网站数据会丢失存档。</p>
           </section>
 
           <section className={`paper-card great-person-card ${game.messiRecruited ? "recruited" : ""}`}>

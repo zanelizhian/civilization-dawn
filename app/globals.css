@@ -75,11 +75,16 @@ button { font: inherit; }
   height: calc(100dvh - 56px);
   display: grid;
   grid-template-columns: 248px minmax(560px, 1fr) 244px;
+  grid-template-rows: minmax(0, 1fr);
   gap: 16px;
   padding: 16px 18px 118px;
 }
 
 .left-rail, .right-rail { display: flex; flex-direction: column; gap: 12px; z-index: 10; min-width: 0; }
+.right-rail { min-height: 0; gap: 8px; overflow-y: auto; padding-right: 3px; scrollbar-width: thin; scrollbar-color: #b9b09f transparent; }
+.right-rail::-webkit-scrollbar { width: 5px; }
+.right-rail::-webkit-scrollbar-thumb { border-radius: 99px; background: #b9b09f; }
+.right-rail .paper-card { padding: 13px; }
 
 .paper-card {
   background: rgba(255,253,248,.94);
@@ -343,19 +348,63 @@ button { font: inherit; }
 .trait span { color: var(--forest); font-weight: 700; }
 .trait b { text-align: right; font-weight: 600; }
 
-.mini-map { height: 86px; display: grid; grid-template-columns: repeat(4, 1fr); grid-template-rows: repeat(3, 1fr); gap: 3px; position: relative; overflow: hidden; padding: 7px; border-radius: 10px; background: #b8d4d1; }
-.mini-map i { border-radius: 5px; background: #91a771; transform: rotate(5deg); }
-.mini-map i:nth-child(3n) { background: #d1b889; }
-.mini-map i:nth-child(5n) { background: #c97757; }
-.mini-player, .mini-rival { width: 9px; height: 9px; position: absolute; border: 2px solid white; border-radius: 50%; box-shadow: 0 1px 3px rgba(0,0,0,.25); }
-.mini-player { left: 47%; top: 52%; background: var(--cobalt); }
-.mini-rival { right: 20%; top: 27%; background: var(--terracotta); }
-.diplomacy-row { display: flex; justify-content: space-between; align-items: center; margin-top: 9px; font-size: 11px; }
+.world-map-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; }
+.world-map-heading .card-kicker { margin: 0; }
+.world-map-heading small { display: block; margin-top: 3px; color: var(--muted); font-size: 8px; }
+.world-map-heading > b { max-width: 92px; color: #9d4d38; font-size: 8px; line-height: 1.35; text-align: right; font-variant-numeric: tabular-nums; }
+.influence-track { height: 4px; margin: 8px 0 9px; overflow: hidden; border-radius: 99px; background: #eadfd8; }
+.influence-track i { display: block; height: 100%; border-radius: inherit; background: linear-gradient(90deg, #d47a5d, #a74d39); }
+.strategic-mini-map { height: 88px; display: grid; place-items: center; overflow: hidden; border: 1px solid #cfc5b2; border-radius: 9px; background: radial-gradient(circle at 52% 45%, #2b3e39, #142321 72%); box-shadow: inset 0 0 24px rgba(0,0,0,.32), 0 2px 5px rgba(34,42,39,.08); }
+.strategic-mini-map svg { width: 100%; height: 100%; display: block; }
+.mini-hex { stroke: rgba(255,255,255,.28); stroke-width: 2.5px; vector-effect: non-scaling-stroke; }
+.mini-hex.mini-water { fill: #75aead; }
+.mini-hex.mini-desert { fill: #c9ad70; }
+.mini-hex.mini-forest { fill: #52735a; }
+.mini-hex.mini-hills { fill: #858a70; }
+.mini-hex.mini-grass { fill: #839c61; }
+.mini-hex.mini-mountain { fill: #9e6753; }
+.mini-hex.fog { fill: url(#mini-fog-pattern); stroke: #46514e; opacity: .78; }
+.mini-hex.argentine-territory { stroke: #75a5f0; stroke-width: 6px; }
+.mini-hex.brazilian-territory { stroke: #e38265; stroke-width: 6px; }
+.mini-selected { fill: none; stroke: #f3ca55; stroke-width: 7px; vector-effect: non-scaling-stroke; filter: drop-shadow(0 0 5px rgba(240,196,92,.8)); }
+.mini-token circle { stroke: white; stroke-width: 4px; vector-effect: non-scaling-stroke; filter: drop-shadow(0 3px 3px rgba(0,0,0,.4)); }
+.mini-token text { fill: white; font-size: 22px; font-weight: 900; pointer-events: none; }
+.mini-city-token circle { fill: #d5a92f; }
+.mini-city-token text { fill: #172422; }
+.mini-unit-token circle { fill: var(--cobalt); }
+.mini-rival-token circle { fill: var(--terracotta); }
+.mini-map-legend { display: flex; flex-wrap: wrap; gap: 3px 7px; margin-top: 5px; color: var(--muted); font-size: 7px; }
+.mini-map-legend span { display: flex; align-items: center; gap: 4px; }
+.mini-map-legend i { width: 13px; height: 11px; display: inline-block; clip-path: polygon(25% 0,75% 0,100% 50%,75% 100%,25% 100%,0 50%); background: #78827d; box-shadow: inset 0 0 0 2px currentColor; }
+.mini-map-legend i.argentina { color: #3157a4; background: #839c61; }
+.mini-map-legend i.brazil { color: #c76548; background: #839c61; }
+.mini-map-legend i.fog { color: #69716d; background: repeating-linear-gradient(135deg, #59615e 0 3px, #7a807c 3px 5px); }
+.world-threat-copy { margin: 4px 0 0 !important; padding: 4px 6px; border-radius: 5px; color: #76564b !important; background: #f3e8e1; font-size: 7px !important; line-height: 1.35 !important; }
+.diplomacy-row { display: flex; justify-content: space-between; align-items: center; margin-top: 5px; font-size: 10px; }
 .diplomacy-row > span { display: flex; align-items: center; gap: 8px; font-weight: 700; }
 .diplomacy-row em { padding: 3px 7px; border-radius: 99px; background: #eee9df; color: var(--muted); font-size: 9px; font-style: normal; }
-.avatar { width: 24px; height: 24px; display: grid; place-items: center; border-radius: 50%; color: white; font-size: 10px; }
+.avatar { width: 20px; height: 20px; display: grid; place-items: center; border-radius: 50%; color: white; font-size: 9px; }
 .avatar.argentina { background: var(--cobalt); }
 .avatar.brazil { background: var(--forest); }
+
+.save-card { padding-block: 9px !important; }
+.save-card-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; }
+.save-card-heading .card-kicker { margin-bottom: 2px; }
+.save-card-heading strong { font-size: 11px; }
+.save-card-heading > small { color: var(--muted); font-size: 7px; text-align: right; }
+.save-actions { display: grid; grid-template-columns: repeat(3, 1fr); gap: 5px; margin-top: 6px; }
+.save-actions button { min-width: 0; min-height: 31px; display: grid; place-items: center; align-content: center; gap: 1px; padding: 3px 2px; border: 1px solid #d7cebd; border-radius: 7px; color: #405049; background: #f4efe5; cursor: pointer; }
+.save-actions button:hover:not(:disabled), .save-actions button:focus-visible:not(:disabled) { outline: 2px solid #9cb4e8; outline-offset: 1px; color: var(--cobalt); background: #edf1f8; }
+.save-actions button:disabled { cursor: default; opacity: .4; }
+.save-actions b { font-size: 13px; line-height: 1; }
+.save-actions span { overflow: hidden; font-size: 7px; font-weight: 800; text-overflow: ellipsis; white-space: nowrap; }
+.save-note { margin: 4px 0 0 !important; color: var(--muted) !important; font-size: 7px !important; line-height: 1.3 !important; }
+.save-confirm { margin-top: 8px; padding: 7px; border: 1px solid #ddc77e; border-radius: 7px; background: #fff7dc; }
+.save-confirm p { margin: 0; color: #605230; font-size: 8px; line-height: 1.4; }
+.save-confirm > div { display: grid; grid-template-columns: 1fr 1fr; gap: 5px; margin-top: 6px; }
+.save-confirm button { min-height: 27px; border: 1px solid #d6cdbb; border-radius: 5px; color: var(--muted); background: #f7f2e8; cursor: pointer; font-size: 7px; font-weight: 800; }
+.save-confirm button.confirm { border-color: #3157a4; color: white; background: #3157a4; }
+.save-confirm button:hover, .save-confirm button:focus-visible { outline: 2px solid #9cb4e8; outline-offset: 1px; }
 
 .messi-medal { width: 50px; height: 50px; display: grid; place-content: center; flex: none; border: 2px solid var(--gold); border-radius: 50%; color: var(--cobalt); background: linear-gradient(#f7f1d2, #eadca4); text-align: center; box-shadow: inset 0 0 0 3px #fff9df; }
 .messi-medal b { font-size: 18px; line-height: 1; }
@@ -450,9 +499,10 @@ button { font: inherit; }
   .resource-strip { grid-column: 1 / 3; width: 100%; justify-content: space-between; order: 3; }
   .resource-strip > span { min-width: 0; flex: 1; border-top: 1px solid rgba(255,255,255,.08); }
   .turn-indicator small, .civ-chip { display: none; }
-  .game-layout { height: auto; display: grid; grid-template-columns: 1fr 1fr; padding: 10px 10px 0; }
+  .game-layout { height: auto; display: grid; grid-template-columns: 1fr 1fr; grid-template-rows: auto auto; padding: 10px 10px 0; }
   .map-stage { grid-column: 1 / 3; grid-row: 1; min-height: 560px; }
   .left-rail, .right-rail { grid-row: 2; }
+  .right-rail { overflow: visible; padding-right: 0; }
   .legend-card { margin-top: 0; }
   .action-dock { width: calc(100% - 20px); min-width: 0; height: 74px; left: 10px; bottom: 10px; transform: none; }
   .action-dock.city-mode { min-width: 0; }
@@ -928,6 +978,7 @@ button { font: inherit; }
   .production-drawer-header { min-height: 94px; padding-top: 18px; }
   .action-dock.placement-hidden { transform: translateY(18px); }
   .placement-lens-banner { top: 58px; }
+  .strategic-mini-map { height: 130px; }
 }
 
 @media (max-width: 620px) {
@@ -948,4 +999,6 @@ button { font: inherit; }
   .placement-lens-banner { min-width: 0; left: 8px; right: 8px; top: 50px; transform: none; }
   .placement-lens-banner kbd { display: none; }
   .yield-controls { z-index: 21; }
+  .strategic-mini-map { height: 138px; }
+  .save-actions button { min-height: 43px; }
 }
