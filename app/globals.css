@@ -141,6 +141,7 @@ button { font: inherit; }
 .selection-swatch.hills { background: #aeb58b; }
 .selection-swatch.grass { background: #a3b67d; }
 .selection-swatch.mountain { background: #c67a59; }
+.selection-swatch.unknown { background: repeating-linear-gradient(135deg, #777d79 0 5px, #969a96 5px 9px); }
 .selection-swatch i { width: 27px; height: 23px; clip-path: inherit; background: rgba(255,255,255,.18); box-shadow: inset 0 0 0 2px rgba(255,255,255,.7); }
 .legend-card.selection-card > .selection-meta { display: flex; align-items: center; justify-content: space-between; gap: 6px; padding: 7px 0; border-top: 1px solid #eee7db; }
 .selection-meta span, .selection-meta b { padding: 3px 6px; border-radius: 99px; font-size: 8px; font-weight: 800; }
@@ -302,6 +303,7 @@ button { font: inherit; }
 .hex-tile.mountain { background: #c67a59; }
 .hex-tile.owned { box-shadow: inset 0 0 0 4px var(--cobalt); }
 .hex-tile.rival { box-shadow: inset 0 0 0 4px var(--terracotta); }
+.hex-tile.surveyed:not(.selected) { filter: saturate(.62) brightness(.88); }
 
 .move-overlay { display: grid !important; place-items: center; position: absolute !important; inset: 5px; z-index: 5; color: #37774e; background: transparent; pointer-events: none; text-shadow: none !important; filter: drop-shadow(0 0 3px rgba(32,75,54,.38)); }
 .hex-ring { width: 100%; height: 100%; position: absolute; inset: 0; overflow: visible; pointer-events: none; }
@@ -327,6 +329,11 @@ button { font: inherit; }
 .place-label small { margin-left: 2px; padding: 3px 6px; border-radius: 99px; color: #eff8f2; background: rgba(16,24,25,.52); font-size: 7px; font-weight: 900; }
 .place-label small.idle { color: #352b12; background: #f0c45c; }
 .capital-selected .place-label { box-shadow: 0 0 0 3px white, 0 0 0 6px #f0c45c, 0 5px 16px rgba(34,42,39,.28); }
+.brazil-city-piece { z-index: 13; }
+.brazil-city-piece .place-label { background: #9d4d38; box-shadow: 0 3px 10px rgba(91,38,29,.34); }
+.brazil-city-piece .place-label b { color: #ffe4d9; }
+.brazil-city-piece .place-label em { color: #9d4d38; }
+.brazil-city-piece .place-label small { color: #fff4ef; background: rgba(77,24,17,.58); }
 .unit-piece { display: grid; justify-items: center; }
 .gaucho-piece { left: 420px; top: 312px; }
 .rival-piece { left: 535px; top: 145px; }
@@ -354,7 +361,7 @@ button { font: inherit; }
 .world-map-heading > b { max-width: 92px; color: #9d4d38; font-size: 8px; line-height: 1.35; text-align: right; font-variant-numeric: tabular-nums; }
 .influence-track { height: 4px; margin: 8px 0 9px; overflow: hidden; border-radius: 99px; background: #eadfd8; }
 .influence-track i { display: block; height: 100%; border-radius: inherit; background: linear-gradient(90deg, #d47a5d, #a74d39); }
-.strategic-mini-map { height: 88px; display: grid; place-items: center; overflow: hidden; border: 1px solid #cfc5b2; border-radius: 9px; background: radial-gradient(circle at 52% 45%, #2b3e39, #142321 72%); box-shadow: inset 0 0 24px rgba(0,0,0,.32), 0 2px 5px rgba(34,42,39,.08); }
+.strategic-mini-map { width: 100%; aspect-ratio: 660 / 539; display: grid; place-items: center; overflow: hidden; border: 1px solid #cfc5b2; border-radius: 9px; background: radial-gradient(circle at 52% 45%, #2b3e39, #142321 72%); box-shadow: inset 0 0 24px rgba(0,0,0,.32), 0 2px 5px rgba(34,42,39,.08); }
 .strategic-mini-map svg { width: 100%; height: 100%; display: block; }
 .mini-hex { stroke: rgba(255,255,255,.28); stroke-width: 2.5px; vector-effect: non-scaling-stroke; }
 .mini-hex.mini-water { fill: #75aead; }
@@ -363,6 +370,7 @@ button { font: inherit; }
 .mini-hex.mini-hills { fill: #858a70; }
 .mini-hex.mini-grass { fill: #839c61; }
 .mini-hex.mini-mountain { fill: #9e6753; }
+.mini-hex.surveyed { filter: saturate(.5) brightness(.68); }
 .mini-hex.fog { fill: url(#mini-fog-pattern); stroke: #46514e; opacity: .78; }
 .mini-hex.argentine-territory { stroke: #75a5f0; stroke-width: 6px; }
 .mini-hex.brazilian-territory { stroke: #e38265; stroke-width: 6px; }
@@ -371,21 +379,40 @@ button { font: inherit; }
 .mini-token text { fill: white; font-size: 22px; font-weight: 900; pointer-events: none; }
 .mini-city-token circle { fill: #d5a92f; }
 .mini-city-token text { fill: #172422; }
+.mini-brazil-city-token circle { fill: #9d4d38; }
+.mini-brazil-city-token text { fill: #fff4ef; font-size: 18px; }
 .mini-unit-token circle { fill: var(--cobalt); }
 .mini-rival-token circle { fill: var(--terracotta); }
+.mini-token .mini-rival-halo { fill: none; stroke: #ffd9cd; stroke-width: 8px; opacity: .96; filter: drop-shadow(0 0 7px rgba(232,111,79,.95)); }
+.mini-brazil-country rect { fill: #983f31; stroke: #ffe0d5; stroke-width: 4px; vector-effect: non-scaling-stroke; filter: drop-shadow(0 3px 5px rgba(0,0,0,.5)); }
+.mini-brazil-country text { fill: white; font-size: 17px; font-weight: 900; letter-spacing: 2px; }
 .mini-map-legend { display: flex; flex-wrap: wrap; gap: 3px 7px; margin-top: 5px; color: var(--muted); font-size: 7px; }
 .mini-map-legend span { display: flex; align-items: center; gap: 4px; }
 .mini-map-legend i { width: 13px; height: 11px; display: inline-block; clip-path: polygon(25% 0,75% 0,100% 50%,75% 100%,25% 100%,0 50%); background: #78827d; box-shadow: inset 0 0 0 2px currentColor; }
 .mini-map-legend i.argentina { color: #3157a4; background: #839c61; }
 .mini-map-legend i.brazil { color: #c76548; background: #839c61; }
+.mini-map-legend i.surveyed { color: #767d78; background: #667268; filter: saturate(.4); }
 .mini-map-legend i.fog { color: #69716d; background: repeating-linear-gradient(135deg, #59615e 0 3px, #7a807c 3px 5px); }
 .world-threat-copy { margin: 4px 0 0 !important; padding: 4px 6px; border-radius: 5px; color: #76564b !important; background: #f3e8e1; font-size: 7px !important; line-height: 1.35 !important; }
+.locate-rival { width: 100%; min-height: 29px; margin-top: 5px; border: 1px solid #d5a08e; border-radius: 7px; color: #843d30; background: #f8e8e1; cursor: pointer; font-size: 8px; font-weight: 900; }
+.locate-rival:hover:not(:disabled), .locate-rival:focus-visible:not(:disabled) { outline: 2px solid #e1aa98; outline-offset: 1px; background: #f5d9cf; }
+.locate-rival:disabled { cursor: default; opacity: .45; }
 .diplomacy-row { display: flex; justify-content: space-between; align-items: center; margin-top: 5px; font-size: 10px; }
 .diplomacy-row > span { display: flex; align-items: center; gap: 8px; font-weight: 700; }
 .diplomacy-row em { padding: 3px 7px; border-radius: 99px; background: #eee9df; color: var(--muted); font-size: 9px; font-style: normal; }
 .avatar { width: 20px; height: 20px; display: grid; place-items: center; border-radius: 50%; color: white; font-size: 9px; }
 .avatar.argentina { background: var(--cobalt); }
 .avatar.brazil { background: var(--forest); }
+.foreign-yield-ribbon { display: grid; grid-template-columns: repeat(4, 1fr); gap: 4px; margin-top: 6px; padding: 7px; border: 1px solid #d8cabd; border-radius: 8px; background: #f5eee6; }
+.foreign-yield-ribbon > div { grid-column: 1 / 5; display: flex; align-items: baseline; justify-content: space-between; gap: 7px; margin-bottom: 1px; }
+.foreign-yield-ribbon strong { color: #633c34; font-size: 9px; }
+.foreign-yield-ribbon small { color: var(--muted); font-size: 7px; }
+.foreign-yield-ribbon > span { min-width: 0; padding: 4px 2px; border-radius: 5px; color: white; text-align: center; font-size: 7px; font-weight: 900; white-space: nowrap; }
+.foreign-yield-ribbon > span.food { background: #3c7a50; }
+.foreign-yield-ribbon > span.production { background: #b65e35; }
+.foreign-yield-ribbon > span.science { background: #326ca7; }
+.foreign-yield-ribbon > span.culture { background: #8054a5; }
+.foreign-yield-ribbon b { font-size: 8px; }
 
 .save-card { padding-block: 9px !important; }
 .save-card-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; }
@@ -459,6 +486,16 @@ button { font: inherit; }
 .city-production-dock > button:disabled { opacity: .45; cursor: default; }
 .city-production-dock > button b { font-size: 18px; }
 .city-production-dock > button span { font-size: 9px; font-weight: 800; }
+.foreign-city-dock { min-width: 0; display: grid; grid-template-columns: minmax(150px, 1fr) repeat(4, 54px); align-items: center; gap: 7px; flex: 1; padding: 10px; }
+.foreign-city-dock > div { min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.foreign-city-dock small { color: #d2a696; font-size: 7px; font-weight: 800; letter-spacing: .08em; }
+.foreign-city-dock strong { overflow: hidden; color: #fff4ef; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.foreign-city-dock > span { padding: 10px 4px; border: 1px solid rgba(255,255,255,.2); border-radius: 8px; color: white; text-align: center; font-size: 8px; font-weight: 900; }
+.foreign-city-dock > span.food { background: #315f42; }
+.foreign-city-dock > span.production { background: #8f4e32; }
+.foreign-city-dock > span.science { background: #2d5b8d; }
+.foreign-city-dock > span.culture { background: #694585; }
+.foreign-city-dock b { font-size: 10px; }
 
 .end-turn-button {
   width: 180px;
@@ -535,10 +572,13 @@ button { font: inherit; }
   .selected-unit div span, .selected-unit div small { display: none; }
   .action-buttons { display: none; }
   .action-dock.city-mode .selected-unit { display: none; }
+  .action-dock.foreign-mode .selected-unit { display: none; }
   .city-production-dock { min-width: 0; }
   .dock-production-copy { min-width: 0; padding-inline: 3px; }
   .dock-production-copy span { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .city-production-dock > button { width: 86px; flex: none; }
+  .foreign-city-dock { grid-template-columns: repeat(4, 1fr); padding: 7px; }
+  .foreign-city-dock > div { display: none; }
   .end-turn-button { position: fixed; }
   .yield-controls { right: 8px; top: 8px; }
   .yield-legend { display: none; }
@@ -978,7 +1018,6 @@ button { font: inherit; }
   .production-drawer-header { min-height: 94px; padding-top: 18px; }
   .action-dock.placement-hidden { transform: translateY(18px); }
   .placement-lens-banner { top: 58px; }
-  .strategic-mini-map { height: 130px; }
 }
 
 @media (max-width: 620px) {
@@ -999,6 +1038,5 @@ button { font: inherit; }
   .placement-lens-banner { min-width: 0; left: 8px; right: 8px; top: 50px; transform: none; }
   .placement-lens-banner kbd { display: none; }
   .yield-controls { z-index: 21; }
-  .strategic-mini-map { height: 138px; }
   .save-actions button { min-height: 43px; }
 }

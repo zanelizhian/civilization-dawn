@@ -50,6 +50,8 @@ type SaveMeta = { savedAt: string; turn: number };
 const COLS = 9;
 const ROWS = 6;
 const CITY_POS = { col: 4, row: 2 };
+const BRAZIL_CITY_POS = { col: 7, row: 0 };
+const BRAZIL_LABEL_POS = { col: 8, row: 0 };
 const SAVE_KEY = "civilization-dawn.single-slot";
 const SAVE_VERSION = 1 as const;
 
@@ -128,7 +130,7 @@ function isBrazilianTerritory({ col, row }: Position) {
   return col >= 7 && row <= 2;
 }
 
-function movementRange(start: Position, remainingMoves: number, enemyIds: ReadonlySet<string>) {
+function movementRange(start: Position, remainingMoves: number, enemyIds: ReadonlySet<string>, knownTiles?: ReadonlySet<string>) {
   const reachable = new Map<string, number>();
   const budget = Math.max(0, Math.floor(remainingMoves));
   if (!inBounds(start) || budget === 0) return reachable;
@@ -142,7 +144,8 @@ function movementRange(start: Position, remainingMoves: number, enemyIds: Readon
     for (const next of neighbors(current)) {
       const nextId = idFor(next);
       const terrain = terrainAt(next);
-      const blocked = terrain === "water" || terrain === "mountain" || enemyIds.has(nextId);
+      const terrainKnown = !knownTiles || knownTiles.has(nextId);
+      const blocked = enemyIds.has(nextId) || (terrainKnown && (terrain === "water" || terrain === "mountain"));
       if (blocked || visited.has(nextId)) continue;
       const nextCost = currentCost + 1;
       if (nextCost > budget) continue;
@@ -171,6 +174,7 @@ function initialDiscovered() {
   let set = new Set<string>();
   set = reveal(set, CITY_POS, 2);
   set = reveal(set, { col: 6, row: 3 }, 1);
+  set.add(idFor(BRAZIL_CITY_POS));
   set.add("7-1");
   return set;
 }
@@ -314,6 +318,12 @@ function readLocalSave(raw: string | null): SaveReadResult {
   if (typeof value.selectedUnit !== "boolean" || typeof value.messiRecruited !== "boolean" || typeof value.messiAbilityUsed !== "boolean") return { ok: false, reason: "corrupt" };
   if (typeof value.message !== "string" || !Array.isArray(value.log) || !value.log.every((entry) => typeof entry === "string")) return { ok: false, reason: "corrupt" };
   if (value.result !== null && value.result !== "win" && value.result !== "lose") return { ok: false, reason: "corrupt" };
+  const completedTechs = value.completedTechs as TechId[];
+  const completedBuildings = value.completedBuildings as ProductionId[];
+  if (new Set(completedTechs).size !== completedTechs.length || new Set(completedBuildings).size !== completedBuildings.length) return { ok: false, reason: "corrupt" };
+  if (value.activeTech !== null && completedTechs.includes(value.activeTech)) return { ok: false, reason: "corrupt" };
+  if (value.activeProduction !== null && completedBuildings.includes(value.activeProduction)) return { ok: false, reason: "corrupt" };
+  if ((Number(value.brazilInfluence) >= 100 && value.result === null) || (value.result === "lose" && Number(value.brazilInfluence) < 100)) return { ok: false, reason: "corrupt" };
   const savedProductionProgress = value.productionProgress;
   const savedBuildingPlacements = value.buildingPlacements;
   if (!isRecord(savedProductionProgress) || PRODUCTIONS.some((production) => !isNonNegativeInteger(savedProductionProgress[production.id]))) return { ok: false, reason: "corrupt" };
@@ -321,15 +331,21 @@ function readLocalSave(raw: string | null): SaveReadResult {
 
   const buildingPlacements: Partial<Record<ProductionId, string>> = {};
   const occupiedTiles = new Set<string>();
+  const discoveredTiles = new Set(value.discovered as string[]);
   for (const production of PRODUCTIONS) {
     const tileId = savedBuildingPlacements[production.id];
     if (tileId === undefined) continue;
     if (!isTileId(tileId) || occupiedTiles.has(tileId)) return { ok: false, reason: "corrupt" };
+    const placementPos = posForId(tileId);
+    if (!discoveredTiles.has(tileId) || !isArgentineTerritory(placementPos) || !CITY_BUILDABLE_IDS.has(tileId) || tileId === idFor(CITY_POS) || IMPROVEMENTS[tileId] || !production.allowedTerrains.includes(terrainAt(placementPos))) return { ok: false, reason: "corrupt" };
     buildingPlacements[production.id] = tileId;
     occupiedTiles.add(tileId);
   }
+  if (value.activeProduction !== null && !buildingPlacements[value.activeProduction]) return { ok: false, reason: "corrupt" };
+  if (completedBuildings.some((productionId) => !buildingPlacements[productionId])) return { ok: false, reason: "corrupt" };
 
   const productionProgress = Object.fromEntries(PRODUCTIONS.map((production) => [production.id, Number(savedProductionProgress[production.id])])) as Record<ProductionId, number>;
+  if (PRODUCTIONS.some((production) => completedBuildings.includes(production.id) ? productionProgress[production.id] !== production.cost : productionProgress[production.id] >= production.cost)) return { ok: false, reason: "corrupt" };
   const game: GameState = {
     turn: Number(value.turn),
     gold: Number(value.gold),
@@ -340,16 +356,16 @@ function readLocalSave(raw: string | null): SaveReadResult {
     food: Number(value.food),
     activeTech: value.activeTech as TechId | null,
     techProgress: Number(value.techProgress),
-    completedTechs: Array.from(new Set(value.completedTechs as TechId[])),
+    completedTechs,
     activeProduction: value.activeProduction as ProductionId | null,
     productionProgress,
-    completedBuildings: Array.from(new Set(value.completedBuildings as ProductionId[])),
+    completedBuildings,
     buildingPlacements,
     unitPos: value.unitPos,
     unitMoves: Number(value.unitMoves),
     brazilPos: value.brazilPos,
     brazilInfluence: Number(value.brazilInfluence),
-    discovered: new Set(value.discovered as string[]),
+    discovered: new Set([...(value.discovered as string[]), idFor(BRAZIL_CITY_POS)]),
     selectedUnit: value.selectedUnit,
     selectedTile: value.selectedTile as string | null,
     messiRecruited: value.messiRecruited,
@@ -369,7 +385,7 @@ function formatSaveTime(savedAt: string) {
 function nextBrazilPosition(state: GameState) {
   const candidates = neighbors(state.brazilPos).filter((pos) => {
     const terrain = terrainAt(pos);
-    return pos.col >= 6 && terrain !== "water" && terrain !== "mountain" && idFor(pos) !== idFor(state.unitPos);
+    return pos.col >= 6 && terrain !== "water" && terrain !== "mountain" && idFor(pos) !== idFor(state.unitPos) && idFor(pos) !== idFor(BRAZIL_CITY_POS);
   });
   return candidates.length ? candidates[state.turn % candidates.length] : state.brazilPos;
 }
@@ -384,7 +400,7 @@ export default function Home() {
   const [placementDetailed, setPlacementDetailed] = useState(false);
   const [productionReminderBypassed, setProductionReminderBypassed] = useState(false);
   const [aiThinking, setAiThinking] = useState(false);
-  const [showYields, setShowYields] = useState(false);
+  const [showYields, setShowYields] = useState(true);
   const [saveMeta, setSaveMeta] = useState<SaveMeta | null>(null);
   const [saveNotice, setSaveNotice] = useState("仅保存在当前设备的浏览器中");
   const [pendingSystemAction, setPendingSystemAction] = useState<"load" | "restart" | null>(null);
@@ -400,6 +416,20 @@ export default function Home() {
     : null;
   const hasAvailableProduction = game.completedBuildings.length < PRODUCTIONS.length;
   const citySelected = !game.selectedUnit && game.selectedTile === idFor(CITY_POS);
+  const brazilCitySelected = !game.selectedUnit && game.selectedTile === idFor(BRAZIL_CITY_POS);
+  const brazilPopulation = 3 + Math.floor((game.turn - 1) / 5);
+  const brazilYields = {
+    food: 6 + Math.floor((game.turn - 1) / 3),
+    production: 5 + Math.floor((game.turn - 1) / 4),
+    science: 3 + Math.floor((game.turn - 1) / 2),
+    culture: 2 + Math.floor(Math.max(0, game.brazilInfluence - 18) / 24),
+  };
+  const visibleTiles = useMemo(() => {
+    let visible = reveal(new Set<string>(), CITY_POS, 2);
+    visible = reveal(visible, game.unitPos, 1);
+    return visible;
+  }, [game.unitPos]);
+  const rivalScoutVisible = visibleTiles.has(idFor(game.brazilPos));
   const placingItem = PRODUCTIONS.find((item) => item.id === placingProduction) ?? null;
   const placedProductionByTile = useMemo(() => {
     const map = new Map<string, ProductionId>();
@@ -431,6 +461,8 @@ export default function Home() {
   const selectedPos = game.selectedTile
     ? posForId(game.selectedTile)
     : game.unitPos;
+  const selectedKnown = game.discovered.has(idFor(selectedPos));
+  const selectedIsBrazilCity = selectedKnown && idFor(selectedPos) === idFor(BRAZIL_CITY_POS);
   const selectedTerrain = terrainAt(selectedPos);
   const selectedImprovement = IMPROVEMENTS[idFor(selectedPos)] ?? null;
   const selectedPlacedProductionId = placedProductionByTile.get(idFor(selectedPos)) ?? null;
@@ -465,8 +497,10 @@ export default function Home() {
   const maxMoves = 2 + (game.completedTechs.includes("riding") ? 1 : 0) + (game.footballTurns > 0 ? 1 : 0);
   const movementCosts = useMemo(() => {
     if (placingProduction || !game.selectedUnit || game.unitMoves <= 0) return new Map<string, number>();
-    return movementRange(game.unitPos, game.unitMoves, new Set([idFor(game.brazilPos)]));
-  }, [placingProduction, game.selectedUnit, game.unitMoves, game.unitPos, game.brazilPos]);
+    const blockers = new Set<string>([idFor(BRAZIL_CITY_POS)]);
+    if (rivalScoutVisible) blockers.add(idFor(game.brazilPos));
+    return movementRange(game.unitPos, game.unitMoves, blockers, game.discovered);
+  }, [placingProduction, game.selectedUnit, game.unitMoves, game.unitPos, game.brazilPos, game.discovered, rivalScoutVisible]);
   const revealedCount = game.discovered.size;
   const objectives = [
     { label: "首都达到 5 人口", value: game.population, target: 5, done: game.population >= 5 },
@@ -549,10 +583,15 @@ export default function Home() {
     setGame((prev) => {
       const tileId = idFor(pos);
       const terrain = terrainAt(pos);
-      const blocked = terrain === "water" || terrain === "mountain" || tileId === idFor(prev.brazilPos);
-      const moveCosts = movementRange(prev.unitPos, prev.unitMoves, new Set([idFor(prev.brazilPos)]));
+      const known = prev.discovered.has(tileId);
+      const terrainBlocked = terrain === "water" || terrain === "mountain";
+      const cityBlocked = tileId === idFor(BRAZIL_CITY_POS);
+      const rivalOccupied = tileId === idFor(prev.brazilPos);
+      const blockers = new Set<string>([idFor(BRAZIL_CITY_POS)]);
+      if (rivalScoutVisible) blockers.add(idFor(prev.brazilPos));
+      const moveCosts = movementRange(prev.unitPos, prev.unitMoves, blockers, prev.discovered);
       const moveCost = moveCosts.get(tileId);
-      if (prev.selectedUnit && moveCost !== undefined && !blocked) {
+      if (prev.selectedUnit && moveCost !== undefined && !terrainBlocked && !cityBlocked && !rivalOccupied) {
         const discovered = reveal(prev.discovered, pos, 1);
         const found = discovered.size - prev.discovered.size;
         const points = Math.min(2, found);
@@ -574,7 +613,13 @@ export default function Home() {
         ...prev,
         selectedTile: tileId,
         selectedUnit: false,
-        message: blocked ? `${TERRAIN_INFO[terrain].label}目前无法通行。` : `已查看${TERRAIN_INFO[terrain].label}地块。`,
+        message: !known
+          ? "这片区域仍在战争迷雾中；请派单位靠近后侦察。"
+          : cityBlocked
+            ? "里约热内卢由巴西控制；当前没有攻城行动。"
+            : rivalOccupied
+              ? "战争迷雾中有单位阻挡，移动中止。"
+              : terrainBlocked ? `${TERRAIN_INFO[terrain].label}目前无法通行。` : `已查看${TERRAIN_INFO[terrain].label}地块。`,
       };
     });
   };
@@ -829,7 +874,7 @@ export default function Home() {
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       const target = event.target as HTMLElement;
-      if (event.key === "Enter" && !["BUTTON", "INPUT", "SELECT", "TEXTAREA"].includes(target.tagName)) requestEndTurn();
+      if (event.key === "Enter" && !pendingSystemAction && !["BUTTON", "INPUT", "SELECT", "TEXTAREA"].includes(target.tagName)) requestEndTurn();
       if (event.key === "Escape") {
         if (pendingSystemAction) {
           setPendingSystemAction(null);
@@ -910,14 +955,18 @@ export default function Home() {
   const cityTileLeft = CITY_POS.col * 70;
   const cityTileTop = CITY_POS.row * 82 + (CITY_POS.col % 2) * 41;
   const cityStyle = { left: cityTileLeft - 39, top: cityTileTop + 57 };
+  const brazilCityTileLeft = BRAZIL_CITY_POS.col * 70;
+  const brazilCityTileTop = BRAZIL_CITY_POS.row * 82 + (BRAZIL_CITY_POS.col % 2) * 41;
+  const brazilCityStyle = { left: brazilCityTileLeft - 31, top: brazilCityTileTop + 55 };
   const messiStyle = { left: cityTileLeft + 67, top: cityTileTop + 18 };
   const unitStyle = { left: game.unitPos.col * 70 + 22, top: game.unitPos.row * 82 + (game.unitPos.col % 2) * 41 + 15 };
   const brazilStyle = { left: game.brazilPos.col * 70 + 22, top: game.brazilPos.row * 82 + (game.brazilPos.col % 2) * 41 + 15 };
   const miniCityGeometry = hexGeometry(CITY_POS);
   const miniUnitGeometry = hexGeometry(game.unitPos);
   const miniBrazilGeometry = hexGeometry(game.brazilPos);
+  const miniBrazilCityGeometry = hexGeometry(BRAZIL_CITY_POS);
+  const miniBrazilLabelGeometry = hexGeometry(BRAZIL_LABEL_POS);
   const selectedMiniGeometry = game.selectedTile && game.discovered.has(game.selectedTile) ? hexGeometry(posForId(game.selectedTile)) : null;
-  const rivalVisibleOnMiniMap = game.discovered.has(idFor(game.brazilPos));
   const savedAtLabel = saveMeta ? formatSaveTime(saveMeta.savedAt) : "暂无临时存档";
 
   const tiles = useMemo(() => TERRAIN.map((terrain, index) => ({ terrain, col: index % COLS, row: Math.floor(index / COLS) })), []);
@@ -973,14 +1022,14 @@ export default function Home() {
           <section className="paper-card legend-card selection-card">
             <div className="card-kicker">当前选择</div>
             <div className="selection-heading">
-              <span className={`selection-swatch ${selectedTerrain}`} aria-hidden="true"><i /></span>
-              <div><h3>{selectedPlacedProduction?.name ?? selectedImprovement?.name ?? selectedYield.label}</h3><p>{selectedPlacedProduction ? `${selectedYield.label}上的城市建筑 · ${selectedPlacedStatus}` : selectedImprovement ? `${selectedYield.label}上的改良设施` : "未改良地块"}</p></div>
+              <span className={`selection-swatch ${selectedKnown ? selectedTerrain : "unknown"}`} aria-hidden="true"><i /></span>
+              <div><h3>{!selectedKnown ? "未知区域" : selectedIsBrazilCity ? "里约热内卢" : selectedPlacedProduction?.name ?? selectedImprovement?.name ?? selectedYield.label}</h3><p>{!selectedKnown ? "战争迷雾覆盖，尚无地形情报" : selectedIsBrazilCity ? `巴西首都 · 人口 ${brazilPopulation}` : selectedPlacedProduction ? `${selectedYield.label}上的城市建筑 · ${selectedPlacedStatus}` : selectedImprovement ? `${selectedYield.label}上的改良设施` : "未改良地块"}</p></div>
             </div>
-            <div className="selection-meta"><span>{isArgentineTerritory(selectedPos) ? "阿根廷领土" : isBrazilianTerritory(selectedPos) ? "巴西领土" : "中立地块"}</span><b>{selectedPlacedStatus ?? (selectedImprovement ? "已建设" : "自然地貌")}</b></div>
-            <div><span><i className="yield-dot food">粮</i>食物</span><b>{selectedYield.food}</b></div>
-            <div><span><i className="yield-dot production">锤</i>生产</span><b>{selectedYield.production}</b></div>
-            <div><span><i className="yield-dot science">科</i>科技</span><b>{selectedYield.science}</b></div>
-            <div><span><i className="yield-dot culture">文</i>文化</span><b>{selectedYield.culture}</b></div>
+            <div className="selection-meta"><span>{!selectedKnown ? "未知领土" : selectedIsBrazilCity ? "巴西文明" : isArgentineTerritory(selectedPos) ? "阿根廷领土" : isBrazilianTerritory(selectedPos) ? "巴西领土" : "中立地块"}</span><b>{!selectedKnown ? "无情报" : selectedIsBrazilCity ? "文明总产出/回合" : selectedPlacedStatus ?? (selectedImprovement ? "已建设" : "自然地貌")}</b></div>
+            <div><span><i className="yield-dot food">粮</i>食物</span><b>{!selectedKnown ? "?" : selectedIsBrazilCity ? `+${brazilYields.food}` : selectedYield.food}</b></div>
+            <div><span><i className="yield-dot production">锤</i>生产</span><b>{!selectedKnown ? "?" : selectedIsBrazilCity ? `+${brazilYields.production}` : selectedYield.production}</b></div>
+            <div><span><i className="yield-dot science">科</i>科技</span><b>{!selectedKnown ? "?" : selectedIsBrazilCity ? `+${brazilYields.science}` : selectedYield.science}</b></div>
+            <div><span><i className="yield-dot culture">文</i>文化</span><b>{!selectedKnown ? "?" : selectedIsBrazilCity ? `+${brazilYields.culture}` : selectedYield.culture}</b></div>
           </section>
         </aside>
 
@@ -1000,6 +1049,7 @@ export default function Home() {
               const tileId = idFor(pos);
               const info = TERRAIN_INFO[terrain];
               const discovered = game.discovered.has(tileId);
+              const visible = visibleTiles.has(tileId);
               const moveCost = movementCosts.get(tileId);
               const reachable = moveCost !== undefined;
               const selected = game.selectedTile === tileId;
@@ -1016,7 +1066,7 @@ export default function Home() {
               const placementCandidateSelected = placementCandidate === tileId;
               const placementFeatured = placementValid && placementOption!.adjacency === bestPlacementAdjacency && bestPlacementAdjacency > 0;
               const tileYield = yieldsFor(pos);
-              const containsUnit = tileId === idFor(game.unitPos) ? "，高乔侦骑在此" : tileId === idFor(game.brazilPos) ? "，巴西斥候在此" : "";
+              const containsUnit = tileId === idFor(game.unitPos) ? "，高乔侦骑在此" : tileId === idFor(game.brazilPos) && rivalScoutVisible ? "，巴西斥候在此" : "";
               const yieldLabel = discovered ? `，粮食 ${tileYield.food}，生产 ${tileYield.production}，科技 ${tileYield.science}，文化 ${tileYield.culture}` : "";
               const tileName = placedProduction ? `${placedProduction.name}，位于${info.label}，${buildingCompleted ? "已建成" : "建造中"}` : improvement ? `${improvement.name}，位于${info.label}` : info.label;
               const placementLabel = placingItem
@@ -1026,7 +1076,7 @@ export default function Home() {
                 : "";
               return (
                 <button
-                  className={`hex-tile ${terrain} ${owned ? "owned" : ""} ${rival ? "rival" : ""} ${discovered ? "" : "fog"} ${reachable ? "reachable" : ""} ${selected && !placingProduction ? "selected" : ""} ${game.footballTurns > 0 && owned ? "football-benefit" : ""} ${placedProduction ? "has-city-building" : ""} ${buildingUnderConstruction ? "construction-site" : ""} ${placementValid ? "placement-valid" : ""} ${placementInvalid ? "placement-invalid" : ""} ${placingItem && !placementValid && !placementInvalid ? "placement-dim" : ""} ${placementCandidateSelected ? "placement-candidate" : ""}`}
+                  className={`hex-tile ${terrain} ${discovered && owned ? "owned" : ""} ${discovered && rival ? "rival" : ""} ${discovered ? visible ? "visible" : "surveyed" : "fog"} ${reachable ? "reachable" : ""} ${selected && !placingProduction ? "selected" : ""} ${game.footballTurns > 0 && discovered && owned ? "football-benefit" : ""} ${placedProduction ? "has-city-building" : ""} ${buildingUnderConstruction ? "construction-site" : ""} ${placementValid ? "placement-valid" : ""} ${placementInvalid ? "placement-invalid" : ""} ${placingItem && !placementValid && !placementInvalid ? "placement-dim" : ""} ${placementCandidateSelected ? "placement-candidate" : ""}`}
                   key={tileId}
                   style={{ left: col * 70, top: row * 82 + (col % 2) * 41 }}
                   aria-label={`${discovered ? tileName : "未知"}地块，第 ${row + 1} 行第 ${col + 1} 列${yieldLabel}${containsUnit}${reachable ? `，可以移动，需要 ${moveCost} 点移动力` : ""}${placementLabel}`}
@@ -1069,15 +1119,19 @@ export default function Home() {
               <span className="place-label"><b>★</b> 布宜诺斯艾利斯 <em>{game.population}</em><small className={activeProduction ? "building" : "idle"}>锤 {activeProduction ? `${activeProduction.name} · ${productionTurnsRemaining}` : "待生产"}</small></span>
             </button>
 
+            <button className={`map-piece capital-piece brazil-city-piece ${brazilCitySelected ? "capital-selected" : ""} ${placingProduction ? "placement-locked" : ""}`} style={brazilCityStyle} aria-label={`里约热内卢，巴西首都，${brazilPopulation} 人口；每回合食物 ${brazilYields.food}，生产 ${brazilYields.production}，科技 ${brazilYields.science}，文化 ${brazilYields.culture}`} onClick={() => setGame((prev) => ({ ...prev, selectedUnit: false, selectedTile: idFor(BRAZIL_CITY_POS), message: "里约热内卢：巴西首都。领袖条会始终显示其文明总产出。" }))} data-testid="brazil-city" disabled={Boolean(placingProduction)}>
+              <span className="place-label"><b>◆</b> 里约热内卢 <em>{brazilPopulation}</em><small>巴西首都</small></span>
+            </button>
+
             <button className={`map-piece unit-piece gaucho-piece ${game.selectedUnit ? "piece-selected" : ""} ${placingProduction ? "placement-locked" : ""}`} style={unitStyle} aria-label={`高乔侦骑，${game.unitMoves} 点移动力`} data-testid="gaucho-unit" onClick={() => setGame((prev) => ({ ...prev, selectedUnit: true, selectedTile: idFor(prev.unitPos), message: "高乔侦骑已选择；绿色落点是本回合可达范围。" }))} disabled={Boolean(placingProduction)}>
               <span className="unit-token" aria-hidden="true"><b>高</b><small>{game.unitMoves}</small></span>
               <span className="unit-label">高乔侦骑</span>
             </button>
 
-            <button className={`map-piece rival-piece ${placingProduction ? "placement-locked" : ""}`} style={brazilStyle} aria-label="巴西斥候" onClick={() => setGame((prev) => ({ ...prev, selectedUnit: false, selectedTile: idFor(prev.brazilPos), message: "巴西斥候：目前保持中立。" }))} disabled={Boolean(placingProduction)}>
+            {rivalScoutVisible && <button className={`map-piece rival-piece ${placingProduction ? "placement-locked" : ""}`} style={brazilStyle} aria-label="巴西斥候" onClick={() => setGame((prev) => ({ ...prev, selectedUnit: false, selectedTile: idFor(prev.brazilPos), message: "巴西斥候：目前保持中立。" }))} disabled={Boolean(placingProduction)}>
               <span className="unit-token" aria-hidden="true"><b>巴</b></span>
               <span className="unit-label">巴西斥候</span>
-            </button>
+            </button>}
 
             {game.messiRecruited && (
               <button className={`map-piece messi-piece ${placingProduction ? "placement-locked" : ""}`} style={messiStyle} aria-label="伟人莱昂内尔·梅西位于布宜诺斯艾利斯" onClick={activateMessi} disabled={Boolean(placingProduction)}>
@@ -1113,12 +1167,12 @@ export default function Home() {
 
           <section className="paper-card world-card">
             <div className="world-map-heading">
-              <div><div className="card-kicker">战略小地图</div><small>已探索 {revealedCount}/{COLS * ROWS} 个地块</small></div>
+              <div><div className="card-kicker">世界小地图</div><small>已探索 {revealedCount}/{COLS * ROWS} 个地块</small></div>
               <b>巴西影响力 {game.brazilInfluence}/100</b>
             </div>
             <div className="influence-track" role="progressbar" aria-label="巴西影响力" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.min(100, game.brazilInfluence)}><i style={{ width: `${Math.min(100, game.brazilInfluence)}%` }} /></div>
             <div className="strategic-mini-map">
-              <svg viewBox="-4 -4 660 539" role="img" aria-label={`战略小地图：已探索 ${revealedCount} 个地块；显示布宜诺斯艾利斯、高乔侦骑${rivalVisibleOnMiniMap ? "和已发现的巴西斥候" : "，巴西斥候目前不在视野内"}`}>
+              <svg viewBox="-4 -4 660 539" role="img" aria-label={`世界小地图：已探索 ${revealedCount} 个地块；红色巴西标牌和城市标记显示里约热内卢，并显示布宜诺斯艾利斯、高乔侦骑${rivalScoutVisible ? "和当前视野内的巴西斥候" : ""}`}>
                 <defs>
                   <pattern id="mini-fog-pattern" width="20" height="20" patternUnits="userSpaceOnUse" patternTransform="rotate(35)"><rect width="20" height="20" fill="#59615e" /><line x1="0" y1="0" x2="0" y2="20" stroke="#737a76" strokeWidth="6" /></pattern>
                 </defs>
@@ -1127,18 +1181,25 @@ export default function Home() {
                   const tileId = idFor(pos);
                   const geometry = hexGeometry(pos);
                   const discovered = game.discovered.has(tileId);
-                  return <polygon key={`mini-${tileId}`} points={geometry.points} className={`mini-hex mini-${terrain} ${discovered ? "revealed" : "fog"} ${discovered && isArgentineTerritory(pos) ? "argentine-territory" : ""} ${discovered && isBrazilianTerritory(pos) ? "brazilian-territory" : ""}`} />;
+                  return <polygon key={`mini-${tileId}`} points={geometry.points} className={`mini-hex mini-${terrain} ${discovered ? visibleTiles.has(tileId) ? "visible" : "surveyed" : "fog"} ${discovered && isArgentineTerritory(pos) ? "argentine-territory" : ""} ${discovered && isBrazilianTerritory(pos) ? "brazilian-territory" : ""}`} />;
                 })}
                 {selectedMiniGeometry && <polygon points={selectedMiniGeometry.points} className="mini-selected" />}
+                <g className="mini-brazil-country" transform={`translate(${miniBrazilLabelGeometry.cx} ${miniBrazilLabelGeometry.cy})`}><rect x="-35" y="-14" width="70" height="28" rx="14" /><text textAnchor="middle" dominantBaseline="central">巴西</text></g>
                 <g className="mini-token mini-city-token" transform={`translate(${miniCityGeometry.cx} ${miniCityGeometry.cy})`}><circle r="20" /><text textAnchor="middle" dominantBaseline="central">★</text></g>
+                <g className="mini-token mini-brazil-city-token" transform={`translate(${miniBrazilCityGeometry.cx} ${miniBrazilCityGeometry.cy})`}><circle className="mini-rival-halo" r="30" /><circle r="21" /><text textAnchor="middle" dominantBaseline="central">◆</text></g>
                 <g className="mini-token mini-unit-token" transform={`translate(${miniUnitGeometry.cx} ${miniUnitGeometry.cy})`}><circle r="18" /><text textAnchor="middle" dominantBaseline="central">高</text></g>
-                {rivalVisibleOnMiniMap && <g className="mini-token mini-rival-token" transform={`translate(${miniBrazilGeometry.cx} ${miniBrazilGeometry.cy})`}><circle r="18" /><text textAnchor="middle" dominantBaseline="central">巴</text></g>}
+                {rivalScoutVisible && <g className="mini-token mini-rival-token" transform={`translate(${miniBrazilGeometry.cx} ${miniBrazilGeometry.cy})`}><circle r="16" /><text textAnchor="middle" dominantBaseline="central">斥</text></g>}
               </svg>
             </div>
-            <div className="mini-map-legend" aria-hidden="true"><span><i className="argentina" />阿根廷领土</span><span><i className="brazil" />巴西领土</span><span><i className="fog" />未探索</span></div>
-            <p className="world-threat-copy">这是主棋盘的缩略图；巴西影响力达到 100 时，阿根廷将失败。</p>
+            <div className="mini-map-legend" aria-hidden="true"><span><i className="argentina" />阿根廷领土</span><span><i className="brazil" />巴西领土</span><span><i className="surveyed" />已探索</span><span><i className="fog" />未探索</span></div>
+            <p className="world-threat-copy">红色“巴西”与双环城市标出里约热内卢；影响力达到 100 时阿根廷失败。</p>
+            <button className="locate-rival" onClick={() => setGame((prev) => ({ ...prev, selectedUnit: false, selectedTile: idFor(BRAZIL_CITY_POS), message: "已在主棋盘用金色边框标出巴西首都里约热内卢。" }))} disabled={aiThinking || Boolean(placingProduction)} data-testid="locate-brazil">⌖ 定位巴西首都</button>
             <div className="diplomacy-row"><span><b className="avatar argentina">A</b>阿根廷</span><em>你</em></div>
-            <div className="diplomacy-row"><span><b className="avatar brazil">B</b>巴西</span><em>{aiThinking ? "行动中" : "中立"}</em></div>
+            <div className="diplomacy-row"><span><b className="avatar brazil">B</b>巴西</span><em>{aiThinking ? "行动中" : "已接触"}</em></div>
+            <div className="foreign-yield-ribbon" aria-label={`巴西文明每回合总产出：食物 ${brazilYields.food}，生产 ${brazilYields.production}，科技 ${brazilYields.science}，文化 ${brazilYields.culture}`}>
+              <div><strong>巴西总产出</strong><small>始终显示 · 每回合</small></div>
+              <span className="food">粮 <b>+{brazilYields.food}</b></span><span className="production">锤 <b>+{brazilYields.production}</b></span><span className="science">科 <b>+{brazilYields.science}</b></span><span className="culture">文 <b>+{brazilYields.culture}</b></span>
+            </div>
           </section>
 
           <section className="paper-card save-card" aria-label="本地临时存档">
@@ -1170,15 +1231,20 @@ export default function Home() {
         </aside>
       </section>
 
-      <div className={`action-dock ${citySelected ? "city-mode" : ""} ${placingProduction ? "placement-hidden" : ""}`} role="region" aria-label={citySelected ? "首都生产操作" : "选中单位操作"}>
+      <div className={`action-dock ${citySelected ? "city-mode" : ""} ${brazilCitySelected ? "foreign-mode" : ""} ${placingProduction ? "placement-hidden" : ""}`} role="region" aria-label={citySelected ? "首都生产操作" : brazilCitySelected ? "巴西文明情报" : "选中单位操作"}>
         <div className="selected-unit">
-          <span className="unit-portrait" aria-hidden="true">{game.selectedUnit ? "高" : citySelected ? "★" : "⌖"}</span>
-          <div className="selected-copy"><small>{game.selectedUnit ? "● 单位已选择" : citySelected ? "● 首都已选择" : "当前地块"}</small><strong>{game.selectedUnit ? "高乔侦骑" : citySelected ? "布宜诺斯艾利斯" : selectedImprovement?.name ?? selectedYield.label}</strong>{game.selectedUnit && <span className="movement-pips" aria-label={`${game.unitMoves} / ${maxMoves} 移动力`}>{Array.from({ length: maxMoves }, (_, index) => <i className={index < game.unitMoves ? "available" : "spent"} key={index} />)}<b>{game.unitMoves}/{maxMoves}</b></span>}<span>{game.selectedUnit ? game.unitMoves > 0 ? "选择绿色落点移动" : "本回合移动力已用完" : citySelected ? `人口 ${game.population} · +${productionPerTurn} 锤/回合` : "点击单位或首都下达命令"}</span></div>
+          <span className="unit-portrait" aria-hidden="true">{game.selectedUnit ? "高" : citySelected ? "★" : brazilCitySelected ? "◆" : selectedKnown ? "⌖" : "?"}</span>
+          <div className="selected-copy"><small>{game.selectedUnit ? "● 单位已选择" : citySelected ? "● 首都已选择" : brazilCitySelected ? "● 外国首都已选择" : selectedKnown ? "当前地块" : "● 未知区域"}</small><strong>{game.selectedUnit ? "高乔侦骑" : citySelected ? "布宜诺斯艾利斯" : brazilCitySelected ? "里约热内卢" : selectedKnown ? selectedImprovement?.name ?? selectedYield.label : "战争迷雾"}</strong>{game.selectedUnit && <span className="movement-pips" aria-label={`${game.unitMoves} / ${maxMoves} 移动力`}>{Array.from({ length: maxMoves }, (_, index) => <i className={index < game.unitMoves ? "available" : "spent"} key={index} />)}<b>{game.unitMoves}/{maxMoves}</b></span>}<span>{game.selectedUnit ? game.unitMoves > 0 ? "选择绿色落点移动" : "本回合移动力已用完" : citySelected ? `人口 ${game.population} · +${productionPerTurn} 锤/回合` : brazilCitySelected ? `巴西人口 ${brazilPopulation} · 总产出已常显` : selectedKnown ? "点击单位或首都下达命令" : "派侦察单位靠近以获取情报"}</span></div>
         </div>
         {citySelected ? (
           <div className="city-production-dock">
             <div className="dock-production-copy"><small>当前生产</small><strong>{activeProduction?.name ?? (hasAvailableProduction ? "尚未安排生产" : "全部建筑已完成")}</strong><span>{activeProduction ? `${activeProductionProgress}/${activeProduction.cost} 锤 · 预计 ${productionTurnsRemaining} 回合` : hasAvailableProduction ? "选择一个项目开始建设" : "布宜诺斯艾利斯已建设完毕"}</span>{activeProduction && <i><em style={{ width: `${productionPercent}%` }} /></i>}</div>
             <button onClick={openCapitalProduction} disabled={aiThinking || !hasAvailableProduction} data-testid="dock-production-button"><b>⚒</b><span>{activeProduction ? "更换生产" : hasAvailableProduction ? "选择生产" : "建设完成"}</span></button>
+          </div>
+        ) : brazilCitySelected ? (
+          <div className="foreign-city-dock" aria-label="巴西文明每回合总产出">
+            <div><small>领袖条情报 · 始终显示</small><strong>巴西每回合总产出</strong></div>
+            <span className="food">粮 <b>+{brazilYields.food}</b></span><span className="production">锤 <b>+{brazilYields.production}</b></span><span className="science">科 <b>+{brazilYields.science}</b></span><span className="culture">文 <b>+{brazilYields.culture}</b></span>
           </div>
         ) : (
           <div className="action-buttons">
