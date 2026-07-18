@@ -6,13 +6,19 @@ import type { CSSProperties, PointerEvent as ReactPointerEvent } from "react";
 type Terrain = "water" | "desert" | "forest" | "hills" | "grass" | "mountain";
 type Position = { col: number; row: number };
 type TechId = "husbandry" | "riding" | "federalism" | "broadcast";
+type CivicId = "craftsmanship" | "foreignTrade" | "publicService" | "popularSovereignty";
+type PolicyId = "urbanPlanning" | "caravansaries" | "publicWorks" | "charismaticLeader";
+type CelebrationId = "harvestFestival" | "industryFair" | "maySquare";
 type BuildingId = "monument" | "granary" | "academy" | "workshop";
-type UnitProductionId = "scout" | "gaucho";
+type UnitProductionId = "scout" | "gaucho" | "builder";
 type ProductionId = BuildingId | UnitProductionId;
-type UnitType = "scout" | "gaucho";
+type UnitType = "scout" | "gaucho" | "builder";
 type YieldKey = "food" | "production" | "science" | "culture";
-type ImprovementType = "palace" | "ranch" | "farm";
-type PlayerUnit = { id: string; type: UnitType; pos: Position; moves: number };
+type ImprovementType = "palace" | "ranch" | "farm" | "mine" | "lumbermill";
+type BuildableImprovementType = Exclude<ImprovementType, "palace">;
+type ResourceId = "wheat" | "horses" | "iron" | "coffee";
+type PlayerUnit = { id: string; type: UnitType; pos: Position; moves: number; charges?: number };
+type TileYields = { food: number; production: number; science: number; culture: number; gold: number };
 type BuildingProject = { id: BuildingId; kind: "building"; name: string; cost: number; icon: string; effect: string; category: string; yield: YieldKey; allowedTerrains: Terrain[]; placementRule: string };
 type UnitProject = { id: UnitProductionId; kind: "unit"; unitType: UnitType; name: string; cost: number; icon: string; effect: string; category: string; yield: "production" };
 type ProductionProject = BuildingProject | UnitProject;
@@ -25,9 +31,15 @@ type GameState = {
   greatPoints: number;
   population: number;
   food: number;
+  workedTiles: string[];
+  builtImprovements: Partial<Record<string, BuildableImprovementType>>;
   activeTech: TechId | null;
   techProgress: number;
   completedTechs: TechId[];
+  activeCivic: CivicId | null;
+  civicProgress: number;
+  completedCivics: CivicId[];
+  activePolicy: PolicyId | null;
   activeProduction: ProductionId | null;
   productionProgress: Record<ProductionId, number>;
   completedBuildings: BuildingId[];
@@ -37,6 +49,15 @@ type GameState = {
   nextUnitSerial: number;
   brazilPos: Position;
   brazilInfluence: number;
+  influence: number;
+  brazilRelationship: number;
+  tradeRouteTurns: number;
+  researchCollaborationTurns: number;
+  sanctionTurns: number;
+  happiness: number;
+  celebration: CelebrationId | null;
+  celebrationTurns: number;
+  celebrationPending: boolean;
   discovered: Set<string>;
   selectedTile: string | null;
   messiRecruited: boolean;
@@ -48,7 +69,7 @@ type GameState = {
 };
 
 type SavedGameState = Omit<GameState, "discovered"> & { discovered: string[] };
-type SaveEnvelope = { version: 1; savedAt: string; game: SavedGameState };
+type SaveEnvelope = { version: 2; savedAt: string; game: SavedGameState };
 type SaveReadResult =
   | { ok: true; savedAt: string; game: GameState }
   | { ok: false; reason: "missing" | "version" | "corrupt" };
@@ -65,8 +86,9 @@ const BRAZIL_SCOUT_START = { col: 12, row: 2 };
 const BOARD_WIDTH = (COLS - 1) * 70 + 92;
 const BOARD_HEIGHT = (ROWS - 1) * 82 + 41 + 80;
 const EXPLORE_TARGET = 42;
+const HAPPINESS_TARGET = 60;
 const SAVE_KEY = "civilization-dawn.single-slot";
-const SAVE_VERSION = 1 as const;
+const SAVE_VERSION = 2 as const;
 
 const LEGACY_TERRAIN: Terrain[] = [
   "water", "desert", "forest", "hills", "grass", "mountain", "water", "desert", "forest",
@@ -86,10 +108,34 @@ const TERRAIN_INFO: Record<Terrain, { label: string; food: number; production: n
   mountain: { label: "山脉", food: 0, production: 1, science: 2, culture: 0, gold: 0 },
 };
 
-const IMPROVEMENTS: Record<string, { type: ImprovementType; name: string; bonus: { food?: number; production?: number; science?: number; culture?: number } }> = {
-  "4-2": { type: "palace", name: "首都宫殿", bonus: { production: 1, science: 1, culture: 1 } },
-  "3-1": { type: "ranch", name: "潘帕斯牧场", bonus: { food: 1, production: 1 } },
-  "2-3": { type: "farm", name: "灌溉农场", bonus: { food: 2 } },
+const INITIAL_IMPROVEMENTS: Record<string, ImprovementType> = {
+  "4-2": "palace",
+  "3-1": "ranch",
+  "2-3": "farm",
+};
+
+const IMPROVEMENT_INFO: Record<ImprovementType, { name: string; bonus: Partial<TileYields> }> = {
+  palace: { name: "首都宫殿", bonus: { production: 1, science: 1, culture: 1 } },
+  ranch: { name: "潘帕斯牧场", bonus: { food: 1, production: 1 } },
+  farm: { name: "灌溉农场", bonus: { food: 2 } },
+  mine: { name: "丘陵矿山", bonus: { production: 2 } },
+  lumbermill: { name: "森林伐木场", bonus: { production: 1, gold: 1 } },
+};
+
+const RESOURCE_TILES: Record<string, ResourceId> = {
+  "2-1": "wheat",
+  "5-2": "iron",
+  "6-2": "horses",
+  "3-3": "coffee",
+  "10-3": "coffee",
+  "11-5": "iron",
+};
+
+const RESOURCE_INFO: Record<ResourceId, { name: string; icon: string; yield: Partial<TileYields>; improvement: BuildableImprovementType }> = {
+  wheat: { name: "小麦", icon: "穗", yield: { food: 1 }, improvement: "farm" },
+  horses: { name: "马", icon: "马", yield: { production: 1 }, improvement: "ranch" },
+  iron: { name: "铁", icon: "铁", yield: { production: 1 }, improvement: "mine" },
+  coffee: { name: "咖啡", icon: "咖", yield: { culture: 1, gold: 1 }, improvement: "lumbermill" },
 };
 
 const TECHS: Array<{ id: TechId; name: string; cost: number; icon: string; effect: string }> = [
@@ -99,6 +145,26 @@ const TECHS: Array<{ id: TechId; name: string; cost: number; icon: string; effec
   { id: "broadcast", name: "大众广播", cost: 24, icon: "◉", effect: "每回合伟人点 +2" },
 ];
 
+const CIVICS: Array<{ id: CivicId; name: string; cost: number; icon: string; effect: string; unlock: PolicyId }> = [
+  { id: "craftsmanship", name: "工艺传统", cost: 14, icon: "⚒", effect: "解锁政策“城市规划”", unlock: "urbanPlanning" },
+  { id: "foreignTrade", name: "对外贸易", cost: 18, icon: "⇄", effect: "解锁政策“商队旅馆”", unlock: "caravansaries" },
+  { id: "publicService", name: "公共服务", cost: 22, icon: "♟", effect: "解锁政策“公共工程”", unlock: "publicWorks" },
+  { id: "popularSovereignty", name: "人民主权", cost: 26, icon: "✦", effect: "解锁政策“魅力领袖”", unlock: "charismaticLeader" },
+];
+
+const POLICIES: Record<PolicyId, { name: string; category: string; icon: string; effect: string; unlockedBy: CivicId }> = {
+  urbanPlanning: { name: "城市规划", category: "经济政策", icon: "锤", effect: "首都生产力 +1", unlockedBy: "craftsmanship" },
+  caravansaries: { name: "商队旅馆", category: "经济政策", icon: "金", effect: "贸易路线金币 +2", unlockedBy: "foreignTrade" },
+  publicWorks: { name: "公共工程", category: "经济政策", icon: "粮", effect: "首都食物 +2", unlockedBy: "publicService" },
+  charismaticLeader: { name: "魅力领袖", category: "外交政策", icon: "鸽", effect: "每回合影响力 +1", unlockedBy: "popularSovereignty" },
+};
+
+const CELEBRATIONS: Record<CelebrationId, { name: string; icon: string; effect: string; yield: YieldKey }> = {
+  harvestFestival: { name: "丰收节", icon: "穗", effect: "4 回合内食物 +3", yield: "food" },
+  industryFair: { name: "工业博览会", icon: "锤", effect: "4 回合内生产力 +3", yield: "production" },
+  maySquare: { name: "五月广场庆典", icon: "文", effect: "4 回合内文化 +3", yield: "culture" },
+};
+
 const PRODUCTIONS: ProductionProject[] = [
   { id: "monument", kind: "building", name: "五月纪念碑", cost: 14, icon: "✦", effect: "每回合文化 +2", category: "文化建筑", yield: "culture", allowedTerrains: ["grass", "desert", "hills"], placementRule: "建在草原、沙漠或丘陵" },
   { id: "granary", kind: "building", name: "潘帕斯粮仓", cost: 21, icon: "♨", effect: "每回合食物 +2", category: "农业建筑", yield: "food", allowedTerrains: ["grass", "forest"], placementRule: "建在草原或森林" },
@@ -106,11 +172,13 @@ const PRODUCTIONS: ProductionProject[] = [
   { id: "workshop", kind: "building", name: "布宜诺斯工坊", cost: 32, icon: "⚒", effect: "首都每回合生产力 +2", category: "工业建筑", yield: "production", allowedTerrains: ["forest", "hills", "desert"], placementRule: "建在森林、丘陵或沙漠" },
   { id: "scout", kind: "unit", unitType: "scout", name: "潘帕斯侦察兵", cost: 12, icon: "侦", effect: "移动力 2 · 擅长揭开战争迷雾", category: "侦察单位", yield: "production" },
   { id: "gaucho", kind: "unit", unitType: "gaucho", name: "高乔骑手", cost: 20, icon: "高", effect: "移动力 3 · 阿根廷特色骑乘单位", category: "骑乘单位", yield: "production" },
+  { id: "builder", kind: "unit", unitType: "builder", name: "潘帕斯建造者", cost: 16, icon: "建", effect: "移动力 2 · 3 次地块改良次数", category: "平民单位", yield: "production" },
 ];
 
 const UNIT_INFO: Record<UnitType, { name: string; short: string; baseMoves: number }> = {
   scout: { name: "潘帕斯侦察兵", short: "侦", baseMoves: 2 },
   gaucho: { name: "高乔骑手", short: "高", baseMoves: 3 },
+  builder: { name: "潘帕斯建造者", short: "建", baseMoves: 2 },
 };
 
 const YIELD_META: Record<YieldKey, { label: string; symbol: string }> = {
@@ -198,6 +266,9 @@ function territoryEdgePath(predicate: (pos: Position) => boolean) {
 const ARGENTINA_EDGE_PATH = territoryEdgePath(isArgentineTerritory);
 const BRAZIL_EDGE_PATH = territoryEdgePath(isBrazilianTerritory);
 const CAPITAL_DISTANCE = hexDistance(CITY_POS, BRAZIL_CITY_POS);
+const TRADE_START = hexGeometry(CITY_POS);
+const TRADE_END = hexGeometry(BRAZIL_CITY_POS);
+const TRADE_ROUTE_PATH = `M ${TRADE_START.cx} ${TRADE_START.cy} C ${TRADE_START.cx + 210} ${TRADE_START.cy - 150}, ${TRADE_END.cx - 220} ${TRADE_END.cy + 150}, ${TRADE_END.cx} ${TRADE_END.cy}`;
 
 function movementRange(start: Position, remainingMoves: number, enemyIds: ReadonlySet<string>, knownTiles?: ReadonlySet<string>) {
   const reachable = new Map<string, number>();
@@ -249,29 +320,54 @@ function initialDiscovered() {
 }
 
 const CITY_BUILDABLE_IDS = reveal(new Set<string>(), CITY_POS, 2);
+const INITIAL_WORKED_TILES = ["3-1", "2-3", "5-2"];
+
+function improvementTypeAt(state: GameState, tileId: string) {
+  return state.builtImprovements[tileId] ?? INITIAL_IMPROVEMENTS[tileId] ?? null;
+}
+
+function improvementAt(state: GameState, tileId: string) {
+  const type = improvementTypeAt(state, tileId);
+  return type ? { type, ...IMPROVEMENT_INFO[type] } : null;
+}
+
+function improvementAllowedAt(pos: Position, type: BuildableImprovementType) {
+  const tileId = idFor(pos);
+  const resource = RESOURCE_TILES[tileId];
+  if (resource) return RESOURCE_INFO[resource].improvement === type;
+  const terrain = terrainAt(pos);
+  return (terrain === "grass" && type === "farm")
+    || (terrain === "forest" && type === "lumbermill")
+    || (terrain === "hills" && type === "mine");
+}
+
+function buildableImprovementFor(state: GameState, pos: Position): BuildableImprovementType | null {
+  const tileId = idFor(pos);
+  if (!state.discovered.has(tileId) || !isArgentineTerritory(pos) || improvementTypeAt(state, tileId) || placedProductionAt(state, tileId) || tileId === idFor(CITY_POS)) return null;
+  const resource = RESOURCE_TILES[tileId];
+  if (resource) return RESOURCE_INFO[resource].improvement;
+  const terrain = terrainAt(pos);
+  if (terrain === "grass") return "farm";
+  if (terrain === "forest") return "lumbermill";
+  if (terrain === "hills") return "mine";
+  return null;
+}
 
 function placedProductionAt(state: GameState, tileId: string) {
   const entry = Object.entries(state.buildingPlacements).find(([, placedTile]) => placedTile === tileId);
   return (entry?.[0] as BuildingId | undefined) ?? null;
 }
 
-function placementAdjacencyFor(productionId: BuildingId, pos: Position) {
+function placementAdjacencyFor(state: GameState, productionId: BuildingId, pos: Position) {
   const adjacent = neighbors(pos);
   const count = adjacent.filter((neighbor) => {
     const terrain = terrainAt(neighbor);
     if (productionId === "monument") return idFor(neighbor) === idFor(CITY_POS) || terrain === "grass";
-    if (productionId === "granary") return terrain === "grass" || IMPROVEMENTS[idFor(neighbor)]?.type === "farm";
+    if (productionId === "granary") return terrain === "grass" || improvementTypeAt(state, idFor(neighbor)) === "farm";
     if (productionId === "academy") return terrain === "mountain" || terrain === "hills";
     return terrain === "hills" || terrain === "forest";
   }).length;
   return Math.min(3, count);
-}
-
-function completedPlacementBonus(state: GameState, productionId: BuildingId) {
-  const tileId = state.buildingPlacements[productionId];
-  return tileId && state.completedBuildings.includes(productionId)
-    ? placementAdjacencyFor(productionId, posForId(tileId))
-    : 0;
 }
 
 function productionPlacementError(state: GameState, productionId: BuildingId, pos: Position) {
@@ -283,7 +379,8 @@ function productionPlacementError(state: GameState, productionId: BuildingId, po
   if (!CITY_BUILDABLE_IDS.has(tileId)) return "超出首都两格建设范围";
   if (tileId === idFor(CITY_POS)) return "首都宫殿已占用这块地";
   if (terrain === "water" || terrain === "mountain") return `${TERRAIN_INFO[terrain].label}不能建设`;
-  if (IMPROVEMENTS[tileId]) return `${IMPROVEMENTS[tileId].name}已占用这块地`;
+  const improvement = improvementAt(state, tileId);
+  if (improvement) return `${improvement.name}已占用这块地`;
   if (placedProductionAt(state, tileId)) return "已有城市建筑占用这块地";
   if (state.units.some((unit) => tileId === idFor(unit.pos)) || tileId === idFor(state.brazilPos)) return "单位正在占用这块地";
   if (!production.allowedTerrains.includes(terrain)) return production.placementRule;
@@ -293,24 +390,96 @@ function productionPlacementError(state: GameState, productionId: BuildingId, po
 function bestAvailableAdjacency(state: GameState, productionId: BuildingId) {
   return MAP_TILES.reduce((best, tile) => {
     const pos = { col: tile.col, row: tile.row };
-    return productionPlacementError(state, productionId, pos) ? best : Math.max(best, placementAdjacencyFor(productionId, pos));
+    return productionPlacementError(state, productionId, pos) ? best : Math.max(best, placementAdjacencyFor(state, productionId, pos));
   }, 0);
 }
 
-function tileProductionFor(state: GameState, pos: Position) {
-  if (placedProductionAt(state, idFor(pos))) return 0;
-  const terrain = TERRAIN_INFO[terrainAt(pos)];
-  const improvement = IMPROVEMENTS[idFor(pos)];
-  return terrain.production + (improvement?.bonus.production ?? 0);
+const EMPTY_YIELDS: TileYields = { food: 0, production: 0, science: 0, culture: 0, gold: 0 };
+
+function addYields(total: TileYields, value: Partial<TileYields>) {
+  total.food += value.food ?? 0;
+  total.production += value.production ?? 0;
+  total.science += value.science ?? 0;
+  total.culture += value.culture ?? 0;
+  total.gold += value.gold ?? 0;
+  return total;
 }
 
-function cityProductionFor(state: GameState) {
-  const workable = [CITY_POS, ...neighbors(CITY_POS)]
-    .filter((pos) => state.discovered.has(idFor(pos)) && isArgentineTerritory(pos))
-    .map((pos) => tileProductionFor(state, pos))
-    .sort((a, b) => b - a);
-  const workedTileProduction = workable.slice(0, Math.max(1, state.population)).reduce((total, value) => total + value, 0);
-  return Math.max(1, workedTileProduction) + (state.completedBuildings.includes("workshop") ? 2 + completedPlacementBonus(state, "workshop") : 0);
+function tileYieldsForState(state: GameState, pos: Position): TileYields {
+  const tileId = idFor(pos);
+  const terrain = terrainAt(pos);
+  const base = TERRAIN_INFO[terrain];
+  const placedProductionId = placedProductionAt(state, tileId);
+  if (placedProductionId) {
+    if (!state.completedBuildings.includes(placedProductionId)) return { ...EMPTY_YIELDS };
+    const project = PRODUCTIONS.find((item): item is BuildingProject => item.kind === "building" && item.id === placedProductionId)!;
+    const value = 2 + placementAdjacencyFor(state, project.id, pos);
+    return { ...EMPTY_YIELDS, [project.yield]: value };
+  }
+
+  const total: TileYields = { food: base.food, production: base.production, science: base.science, culture: base.culture, gold: base.gold };
+  const improvement = improvementAt(state, tileId);
+  if (improvement) addYields(total, improvement.bonus);
+  const resource = RESOURCE_TILES[tileId];
+  if (resource) addYields(total, RESOURCE_INFO[resource].yield);
+  const owned = isArgentineTerritory(pos);
+  if (owned && terrain === "grass") total.culture += 1;
+  if (owned && terrain === "grass" && state.completedTechs.includes("husbandry")) total.food += 1;
+  if (owned && state.footballTurns > 0) {
+    total.food += 1;
+    total.science += 1;
+  }
+  return total;
+}
+
+function workedTileScore(state: GameState, tileId: string) {
+  const yields = tileYieldsForState(state, posForId(tileId));
+  return yields.food * 1.2 + yields.production * 1.25 + yields.science + yields.culture + yields.gold * .65;
+}
+
+function normalizeWorkedTiles(state: GameState, population = state.population) {
+  const validIds = MAP_TILES
+    .map((tile) => idFor(tile))
+    .filter((tileId) => tileId !== idFor(CITY_POS)
+      && state.discovered.has(tileId)
+      && isArgentineTerritory(posForId(tileId))
+      && terrainAt(posForId(tileId)) !== "mountain"
+      && !placedProductionAt(state, tileId));
+  const retained = Array.from(new Set(state.workedTiles)).filter((tileId) => validIds.includes(tileId)).slice(0, population);
+  const remaining = validIds.filter((tileId) => !retained.includes(tileId)).sort((a, b) => workedTileScore(state, b) - workedTileScore(state, a));
+  return [...retained, ...remaining].slice(0, population);
+}
+
+function cityYieldTotals(state: GameState): TileYields {
+  const total = { ...EMPTY_YIELDS };
+  const worked = new Set([idFor(CITY_POS), ...normalizeWorkedTiles(state)]);
+  worked.forEach((tileId) => addYields(total, tileYieldsForState(state, posForId(tileId))));
+  state.completedBuildings.forEach((buildingId) => {
+    const tileId = state.buildingPlacements[buildingId];
+    if (tileId && !worked.has(tileId)) addYields(total, tileYieldsForState(state, posForId(tileId)));
+  });
+  if (state.activePolicy === "urbanPlanning") total.production += 1;
+  if (state.activePolicy === "publicWorks") total.food += 2;
+  if (state.activePolicy === "caravansaries" && state.tradeRouteTurns > 0) total.gold += 2;
+  if (state.completedTechs.includes("federalism")) total.science += 2;
+  if (state.messiRecruited) total.culture += 2;
+  if (state.celebration && state.celebrationTurns > 0) total[CELEBRATIONS[state.celebration].yield] += 3;
+  if (state.happiness <= 10) {
+    total.food = Math.max(1, Math.floor(total.food * .8));
+    total.production = Math.max(1, Math.floor(total.production * .8));
+    total.science = Math.max(1, Math.floor(total.science * .8));
+    total.culture = Math.max(1, Math.floor(total.culture * .8));
+    total.gold = Math.max(0, Math.floor(total.gold * .8));
+  }
+  return total;
+}
+
+function happinessGainFor(state: GameState, population = state.population, completedBuildingCount = state.completedBuildings.length, relationship = state.brazilRelationship) {
+  return Math.max(0, 3 + completedBuildingCount + (state.tradeRouteTurns > 0 ? 2 : 0) + (relationship >= 65 ? 1 : 0) - Math.max(0, population - 4));
+}
+
+function influenceGainFor(state: GameState) {
+  return 3 + (state.activePolicy === "charismaticLeader" ? 1 : 0);
 }
 
 function maxMovesForUnit(type: UnitType, completedTechs: readonly TechId[], footballTurns: number) {
@@ -340,11 +509,17 @@ function createInitialState(): GameState {
     greatPoints: 18,
     population: 3,
     food: 4,
+    workedTiles: INITIAL_WORKED_TILES,
+    builtImprovements: {},
     activeTech: "husbandry",
     techProgress: 0,
     completedTechs: [],
+    activeCivic: "craftsmanship",
+    civicProgress: 0,
+    completedCivics: [],
+    activePolicy: null,
     activeProduction: null,
-    productionProgress: { monument: 0, granary: 0, academy: 0, workshop: 0, scout: 0, gaucho: 0 },
+    productionProgress: { monument: 0, granary: 0, academy: 0, workshop: 0, scout: 0, gaucho: 0, builder: 0 },
     completedBuildings: [],
     buildingPlacements: {},
     units: [{ id: "gaucho-1", type: "gaucho", pos: { col: 6, row: 3 }, moves: 3 }],
@@ -352,6 +527,15 @@ function createInitialState(): GameState {
     nextUnitSerial: 2,
     brazilPos: BRAZIL_SCOUT_START,
     brazilInfluence: 18,
+    influence: 30,
+    brazilRelationship: 50,
+    tradeRouteTurns: 0,
+    researchCollaborationTurns: 0,
+    sanctionTurns: 0,
+    happiness: 28,
+    celebration: null,
+    celebrationTurns: 0,
+    celebrationPending: false,
     discovered: initialDiscovered(),
     selectedTile: idFor({ col: 6, row: 3 }),
     messiRecruited: false,
@@ -375,9 +559,13 @@ const isPosition = (value: unknown): value is Position => {
   return inBounds({ col: Number(value.col), row: Number(value.row) });
 };
 const isTechId = (value: unknown): value is TechId => typeof value === "string" && TECHS.some((tech) => tech.id === value);
+const isCivicId = (value: unknown): value is CivicId => typeof value === "string" && CIVICS.some((civic) => civic.id === value);
+const isPolicyId = (value: unknown): value is PolicyId => typeof value === "string" && Object.prototype.hasOwnProperty.call(POLICIES, value);
+const isCelebrationId = (value: unknown): value is CelebrationId => typeof value === "string" && Object.prototype.hasOwnProperty.call(CELEBRATIONS, value);
 const isProductionId = (value: unknown): value is ProductionId => typeof value === "string" && PRODUCTIONS.some((production) => production.id === value);
 const isBuildingId = (value: unknown): value is BuildingId => typeof value === "string" && PRODUCTIONS.some((production) => production.kind === "building" && production.id === value);
-const isUnitType = (value: unknown): value is UnitType => value === "scout" || value === "gaucho";
+const isUnitType = (value: unknown): value is UnitType => value === "scout" || value === "gaucho" || value === "builder";
+const isBuildableImprovementType = (value: unknown): value is BuildableImprovementType => value === "farm" || value === "ranch" || value === "mine" || value === "lumbermill";
 
 function makeLocalSave(game: GameState): SaveEnvelope {
   return {
@@ -396,7 +584,8 @@ function readLocalSave(raw: string | null): SaveReadResult {
     return { ok: false, reason: "corrupt" };
   }
   if (!isRecord(parsed)) return { ok: false, reason: "corrupt" };
-  if (parsed.version !== SAVE_VERSION) return { ok: false, reason: "version" };
+  if (parsed.version !== 1 && parsed.version !== SAVE_VERSION) return { ok: false, reason: "version" };
+  const legacyVersion = parsed.version === 1;
   if (typeof parsed.savedAt !== "string" || Number.isNaN(Date.parse(parsed.savedAt)) || !isRecord(parsed.game)) return { ok: false, reason: "corrupt" };
 
   const value = parsed.game;
@@ -423,16 +612,25 @@ function readLocalSave(raw: string | null): SaveReadResult {
   if (!isRecord(savedProductionProgress) || PRODUCTIONS.some((production) => savedProductionProgress[production.id] !== undefined && !isNonNegativeInteger(savedProductionProgress[production.id]))) return { ok: false, reason: "corrupt" };
   if (!isRecord(savedBuildingPlacements) || Object.keys(savedBuildingPlacements).some((key) => !isBuildingId(key))) return { ok: false, reason: "corrupt" };
 
+  const discoveredTiles = new Set(value.discovered as string[]);
+  const builtImprovements: Partial<Record<string, BuildableImprovementType>> = {};
+  if (value.builtImprovements !== undefined) {
+    if (!isRecord(value.builtImprovements)) return { ok: false, reason: "corrupt" };
+    for (const [tileId, type] of Object.entries(value.builtImprovements)) {
+      if (!isTileId(tileId) || !isBuildableImprovementType(type) || !discoveredTiles.has(tileId) || INITIAL_IMPROVEMENTS[tileId] || !isArgentineTerritory(posForId(tileId)) || !improvementAllowedAt(posForId(tileId), type)) return { ok: false, reason: "corrupt" };
+      builtImprovements[tileId] = type;
+    }
+  } else if (!legacyVersion) return { ok: false, reason: "corrupt" };
+
   const buildingPlacements: Partial<Record<BuildingId, string>> = {};
   const occupiedTiles = new Set<string>();
-  const discoveredTiles = new Set(value.discovered as string[]);
   const buildingProjects = PRODUCTIONS.filter((production): production is BuildingProject => production.kind === "building");
   for (const production of buildingProjects) {
     const tileId = savedBuildingPlacements[production.id];
     if (tileId === undefined) continue;
     if (!isTileId(tileId) || occupiedTiles.has(tileId)) return { ok: false, reason: "corrupt" };
     const placementPos = posForId(tileId);
-    if (!discoveredTiles.has(tileId) || !isArgentineTerritory(placementPos) || !CITY_BUILDABLE_IDS.has(tileId) || tileId === idFor(CITY_POS) || IMPROVEMENTS[tileId] || !production.allowedTerrains.includes(terrainAt(placementPos))) return { ok: false, reason: "corrupt" };
+    if (!discoveredTiles.has(tileId) || !isArgentineTerritory(placementPos) || !CITY_BUILDABLE_IDS.has(tileId) || tileId === idFor(CITY_POS) || INITIAL_IMPROVEMENTS[tileId] || builtImprovements[tileId] || !production.allowedTerrains.includes(terrainAt(placementPos))) return { ok: false, reason: "corrupt" };
     buildingPlacements[production.id] = tileId;
     occupiedTiles.add(tileId);
   }
@@ -450,21 +648,59 @@ function readLocalSave(raw: string | null): SaveReadResult {
     const unitIds = new Set<string>();
     const unitTiles = new Set<string>();
     for (const candidate of value.units) {
-      if (!isRecord(candidate) || typeof candidate.id !== "string" || !/^(scout|gaucho)-\d+$/.test(candidate.id) || !isUnitType(candidate.type) || !isPosition(candidate.pos) || !isNonNegativeInteger(candidate.moves)) return { ok: false, reason: "corrupt" };
+      if (!isRecord(candidate) || typeof candidate.id !== "string" || !/^(scout|gaucho|builder)-\d+$/.test(candidate.id) || !isUnitType(candidate.type) || !isPosition(candidate.pos) || !isNonNegativeInteger(candidate.moves)) return { ok: false, reason: "corrupt" };
+      if (candidate.type === "builder" && (!isNonNegativeInteger(candidate.charges) || Number(candidate.charges) < 1 || Number(candidate.charges) > 3)) return { ok: false, reason: "corrupt" };
       if (unitIds.has(candidate.id) || unitTiles.has(idFor(candidate.pos))) return { ok: false, reason: "corrupt" };
       unitIds.add(candidate.id);
       unitTiles.add(idFor(candidate.pos));
-      units.push({ id: candidate.id, type: candidate.type, pos: candidate.pos, moves: Number(candidate.moves) });
+      units.push({ id: candidate.id, type: candidate.type, pos: candidate.pos, moves: Number(candidate.moves), ...(candidate.type === "builder" ? { charges: Number(candidate.charges) } : {}) });
     }
     if (value.selectedUnitId !== null && (typeof value.selectedUnitId !== "string" || !unitIds.has(value.selectedUnitId))) return { ok: false, reason: "corrupt" };
     selectedUnitId = value.selectedUnitId as string | null;
-    nextUnitSerial = isNonNegativeInteger(value.nextUnitSerial) ? Math.max(Number(value.nextUnitSerial), units.length + 1) : units.length + 1;
+    const maxSerial = units.reduce((max, unit) => Math.max(max, Number(unit.id.split("-").at(-1)) || 0), 0);
+    nextUnitSerial = isNonNegativeInteger(value.nextUnitSerial) ? Math.max(Number(value.nextUnitSerial), maxSerial + 1) : maxSerial + 1;
   } else {
     if (!isPosition(value.unitPos) || !isNonNegativeInteger(value.unitMoves) || typeof value.selectedUnit !== "boolean") return { ok: false, reason: "corrupt" };
     units = [{ id: "gaucho-1", type: "gaucho", pos: value.unitPos, moves: Number(value.unitMoves) }];
     selectedUnitId = value.selectedUnit ? "gaucho-1" : null;
     nextUnitSerial = 2;
   }
+
+  let workedTiles: string[];
+  if (Array.isArray(value.workedTiles)) {
+    if (!value.workedTiles.every(isTileId) || new Set(value.workedTiles).size !== value.workedTiles.length || value.workedTiles.length > Number(value.population)) return { ok: false, reason: "corrupt" };
+    workedTiles = value.workedTiles as string[];
+    if (workedTiles.some((tileId) => tileId === idFor(CITY_POS) || !discoveredTiles.has(tileId) || !isArgentineTerritory(posForId(tileId)))) return { ok: false, reason: "corrupt" };
+  } else if (legacyVersion) {
+    const fallback = MAP_TILES.map((tile) => idFor(tile)).filter((tileId) => tileId !== idFor(CITY_POS) && discoveredTiles.has(tileId) && isArgentineTerritory(posForId(tileId)));
+    workedTiles = [...INITIAL_WORKED_TILES.filter((tileId) => fallback.includes(tileId)), ...fallback.filter((tileId) => !INITIAL_WORKED_TILES.includes(tileId))].slice(0, Number(value.population));
+  } else return { ok: false, reason: "corrupt" };
+
+  const completedCivics = Array.isArray(value.completedCivics) ? value.completedCivics as CivicId[] : legacyVersion ? [] : null;
+  if (!completedCivics || !completedCivics.every(isCivicId) || new Set(completedCivics).size !== completedCivics.length) return { ok: false, reason: "corrupt" };
+  const activeCivic = value.activeCivic === undefined && legacyVersion ? "craftsmanship" : value.activeCivic;
+  if (activeCivic !== null && !isCivicId(activeCivic)) return { ok: false, reason: "corrupt" };
+  if (activeCivic !== null && completedCivics.includes(activeCivic)) return { ok: false, reason: "corrupt" };
+  const civicProgress = value.civicProgress === undefined && legacyVersion ? 0 : value.civicProgress;
+  if (!isNonNegativeInteger(civicProgress)) return { ok: false, reason: "corrupt" };
+  const activePolicy = value.activePolicy === undefined && legacyVersion ? null : value.activePolicy;
+  if (activePolicy !== null && !isPolicyId(activePolicy)) return { ok: false, reason: "corrupt" };
+  if (activePolicy !== null && !completedCivics.includes(POLICIES[activePolicy].unlockedBy)) return { ok: false, reason: "corrupt" };
+
+  const influence = value.influence === undefined && legacyVersion ? 30 : value.influence;
+  const brazilRelationship = value.brazilRelationship === undefined && legacyVersion ? 50 : value.brazilRelationship;
+  const tradeRouteTurns = value.tradeRouteTurns === undefined && legacyVersion ? 0 : value.tradeRouteTurns;
+  const researchCollaborationTurns = value.researchCollaborationTurns === undefined && legacyVersion ? 0 : value.researchCollaborationTurns;
+  const sanctionTurns = value.sanctionTurns === undefined && legacyVersion ? 0 : value.sanctionTurns;
+  const happiness = value.happiness === undefined && legacyVersion ? 28 : value.happiness;
+  const celebrationTurns = value.celebrationTurns === undefined && legacyVersion ? 0 : value.celebrationTurns;
+  if (![influence, brazilRelationship, tradeRouteTurns, researchCollaborationTurns, sanctionTurns, happiness, celebrationTurns].every(isNonNegativeInteger) || Number(brazilRelationship) > 100) return { ok: false, reason: "corrupt" };
+  const celebration = value.celebration === undefined && legacyVersion ? null : value.celebration;
+  if (celebration !== null && !isCelebrationId(celebration)) return { ok: false, reason: "corrupt" };
+  if ((celebration === null && Number(celebrationTurns) !== 0) || (celebration !== null && Number(celebrationTurns) === 0)) return { ok: false, reason: "corrupt" };
+  const celebrationPending = value.celebrationPending === undefined && legacyVersion ? false : value.celebrationPending;
+  if (typeof celebrationPending !== "boolean") return { ok: false, reason: "corrupt" };
+
   const legacySave = !Array.isArray(value.units);
   const migratedBrazilPos = isBrazilianTerritory(value.brazilPos) ? value.brazilPos : BRAZIL_SCOUT_START;
   const migratedSelectedTile = legacySave && value.selectedTile === "7-0"
@@ -480,9 +716,15 @@ function readLocalSave(raw: string | null): SaveReadResult {
     greatPoints: Number(value.greatPoints),
     population: Number(value.population),
     food: Number(value.food),
+    workedTiles,
+    builtImprovements,
     activeTech: value.activeTech as TechId | null,
     techProgress: Number(value.techProgress),
     completedTechs,
+    activeCivic: activeCivic as CivicId | null,
+    civicProgress: Number(civicProgress),
+    completedCivics,
+    activePolicy: activePolicy as PolicyId | null,
     activeProduction: value.activeProduction as ProductionId | null,
     productionProgress,
     completedBuildings,
@@ -492,6 +734,15 @@ function readLocalSave(raw: string | null): SaveReadResult {
     nextUnitSerial,
     brazilPos: migratedBrazilPos,
     brazilInfluence: Number(value.brazilInfluence),
+    influence: Number(influence),
+    brazilRelationship: Number(brazilRelationship),
+    tradeRouteTurns: Number(tradeRouteTurns),
+    researchCollaborationTurns: Number(researchCollaborationTurns),
+    sanctionTurns: Number(sanctionTurns),
+    happiness: Number(happiness),
+    celebration: celebration as CelebrationId | null,
+    celebrationTurns: Number(celebrationTurns),
+    celebrationPending,
     discovered: new Set([...(value.discovered as string[]), idFor(BRAZIL_CITY_POS)]),
     selectedTile: migratedSelectedTile,
     messiRecruited: value.messiRecruited,
@@ -501,6 +752,7 @@ function readLocalSave(raw: string | null): SaveReadResult {
     log: (value.log as string[]).slice(0, 4),
     result: value.result as "win" | "lose" | null,
   };
+  game.workedTiles = normalizeWorkedTiles(game);
   return { ok: true, savedAt: parsed.savedAt, game };
 }
 
@@ -520,6 +772,8 @@ export default function Home() {
   const [game, setGame] = useState<GameState>(createInitialState);
   const [techPickerOpen, setTechPickerOpen] = useState(false);
   const [productionDrawerOpen, setProductionDrawerOpen] = useState(false);
+  const [strategyDrawerOpen, setStrategyDrawerOpen] = useState(false);
+  const [strategyTab, setStrategyTab] = useState<"citizens" | "civics" | "diplomacy" | "happiness">("citizens");
   const [placingProduction, setPlacingProduction] = useState<BuildingId | null>(null);
   const [placementCandidate, setPlacementCandidate] = useState<string | null>(null);
   const [hoveredPlacementTile, setHoveredPlacementTile] = useState<string | null>(null);
@@ -582,8 +836,11 @@ export default function Home() {
   };
 
   const activeTech = TECHS.find((tech) => tech.id === game.activeTech) ?? null;
+  const activeCivic = CIVICS.find((civic) => civic.id === game.activeCivic) ?? null;
   const activeProduction = PRODUCTIONS.find((item) => item.id === game.activeProduction) ?? null;
-  const productionPerTurn = cityProductionFor(game);
+  const cityYields = cityYieldTotals(game);
+  const effectiveWorkedTiles = normalizeWorkedTiles(game);
+  const productionPerTurn = Math.max(1, cityYields.production);
   const activeProductionProgress = activeProduction ? game.productionProgress[activeProduction.id] : 0;
   const productionTurnsRemaining = activeProduction
     ? Math.max(1, Math.ceil((activeProduction.cost - activeProductionProgress) / productionPerTurn))
@@ -594,6 +851,10 @@ export default function Home() {
   const citySelected = !selectedUnit && game.selectedTile === idFor(CITY_POS);
   const brazilCitySelected = !selectedUnit && game.selectedTile === idFor(BRAZIL_CITY_POS);
   const brazilPopulation = 3 + Math.floor((game.turn - 1) / 5);
+  const managingCitizens = strategyDrawerOpen && strategyTab === "citizens";
+  const happinessPerTurn = happinessGainFor(game);
+  const influencePerTurn = influenceGainFor(game);
+  const relationshipLabel = game.brazilRelationship >= 75 ? "互助" : game.brazilRelationship >= 60 ? "友好" : game.brazilRelationship >= 40 ? "中立" : game.brazilRelationship >= 20 ? "不友好" : "敌对";
   const brazilYields = {
     food: 6 + Math.floor((game.turn - 1) / 3),
     production: 5 + Math.floor((game.turn - 1) / 4),
@@ -622,7 +883,7 @@ export default function Home() {
       const tileId = idFor(pos);
       map.set(tileId, {
         error: productionPlacementError(game, placingProduction, pos),
-        adjacency: placementAdjacencyFor(placingProduction, pos),
+        adjacency: placementAdjacencyFor(game, placingProduction, pos),
       });
     });
     return map;
@@ -640,7 +901,7 @@ export default function Home() {
   const selectedKnown = game.discovered.has(idFor(selectedPos));
   const selectedIsBrazilCity = selectedKnown && idFor(selectedPos) === idFor(BRAZIL_CITY_POS);
   const selectedTerrain = terrainAt(selectedPos);
-  const selectedImprovement = IMPROVEMENTS[idFor(selectedPos)] ?? null;
+  const selectedImprovement = improvementAt(game, idFor(selectedPos));
   const selectedPlacedProductionId = placedProductionByTile.get(idFor(selectedPos)) ?? null;
   const selectedPlacedProduction = PRODUCTIONS.find((item) => item.id === selectedPlacedProductionId) ?? null;
   const selectedPlacedStatus = selectedPlacedProductionId
@@ -648,37 +909,10 @@ export default function Home() {
       ? "已建成"
       : game.activeProduction === selectedPlacedProductionId ? "建造中" : "已规划"
     : null;
-  const yieldsFor = (pos: Position) => {
-    const terrain = terrainAt(pos);
-    const base = TERRAIN_INFO[terrain];
-    const improvement = IMPROVEMENTS[idFor(pos)];
-    const placedProductionId = placedProductionByTile.get(idFor(pos)) ?? null;
-    const completedPlacedProduction = placedProductionId && game.completedBuildings.includes(placedProductionId)
-      ? PRODUCTIONS.find((item): item is BuildingProject => item.id === placedProductionId && item.kind === "building") ?? null
-      : null;
-    const placedYield = completedPlacedProduction ? 2 + placementAdjacencyFor(completedPlacedProduction.id, pos) : 0;
-    if (placedProductionId) {
-      return {
-        ...base,
-        food: completedPlacedProduction?.yield === "food" ? placedYield : 0,
-        production: completedPlacedProduction?.yield === "production" ? placedYield : 0,
-        science: completedPlacedProduction?.yield === "science" ? placedYield : 0,
-        culture: completedPlacedProduction?.yield === "culture" ? placedYield : 0,
-      };
-    }
-    const owned = isArgentineTerritory(pos);
-    const footballBonus = game.footballTurns > 0 && owned ? 1 : 0;
-    const husbandryBonus = owned && terrain === "grass" && game.completedTechs.includes("husbandry") ? 1 : 0;
-    const argentinaCulture = owned && terrain === "grass" ? 1 : 0;
-    return {
-      ...base,
-      food: base.food + footballBonus + husbandryBonus + (improvement?.bonus.food ?? 0) + (completedPlacedProduction?.yield === "food" ? placedYield : 0),
-      production: base.production + (improvement?.bonus.production ?? 0) + (completedPlacedProduction?.yield === "production" ? placedYield : 0),
-      science: base.science + footballBonus + (improvement?.bonus.science ?? 0) + (completedPlacedProduction?.yield === "science" ? placedYield : 0),
-      culture: base.culture + argentinaCulture + (improvement?.bonus.culture ?? 0) + (completedPlacedProduction?.yield === "culture" ? placedYield : 0),
-    };
-  };
+  const yieldsFor = (pos: Position) => tileYieldsForState(game, pos);
   const selectedYield = yieldsFor(selectedPos);
+  const selectedResource = RESOURCE_TILES[idFor(selectedPos)] ? RESOURCE_INFO[RESOURCE_TILES[idFor(selectedPos)]] : null;
+  const selectedBuildImprovement = selectedUnit?.type === "builder" ? buildableImprovementFor(game, selectedUnit.pos) : null;
   const maxMoves = selectedUnit ? maxMovesForUnit(selectedUnit.type, game.completedTechs, game.footballTurns) : 0;
   const movementCosts = (() => {
     if (placingProduction || !selectedUnit || selectedUnit.moves <= 0) return new Map<string, number>();
@@ -704,6 +938,7 @@ export default function Home() {
     setAiThinking(false);
     setTechPickerOpen(false);
     setProductionDrawerOpen(false);
+    setStrategyDrawerOpen(false);
     setPlacingProduction(null);
     setPlacementCandidate(null);
     setHoveredPlacementTile(null);
@@ -745,14 +980,156 @@ export default function Home() {
       };
     });
     setTechPickerOpen(false);
+    setStrategyDrawerOpen(false);
     setPlacingProduction(null);
     setPlacementCandidate(null);
     setHoveredPlacementTile(null);
     setProductionDrawerOpen(true);
   };
 
+  const openStrategy = (tab: "citizens" | "civics" | "diplomacy" | "happiness") => {
+    if (aiThinking || game.result) return;
+    setTechPickerOpen(false);
+    setProductionDrawerOpen(false);
+    setPlacingProduction(null);
+    setPlacementCandidate(null);
+    setHoveredPlacementTile(null);
+    setStrategyTab(tab);
+    setStrategyDrawerOpen(true);
+    setGame((prev) => ({
+      ...prev,
+      selectedUnitId: tab === "citizens" ? null : prev.selectedUnitId,
+      selectedTile: tab === "citizens" ? idFor(CITY_POS) : prev.selectedTile,
+      message: tab === "citizens" ? "市民管理已开启：点击蓝色城市边界内的地块来调整工作地块。" : prev.message,
+    }));
+  };
+
+  const chooseCivic = (civicId: CivicId) => {
+    if (aiThinking || aiLockRef.current) return;
+    if (game.completedCivics.includes(civicId)) return;
+    const civic = CIVICS.find((item) => item.id === civicId)!;
+    setGame((prev) => ({ ...prev, activeCivic: civicId, message: `开始推进市政：${civic.name}。文化进度会保留。` }));
+  };
+
+  const autoAssignCitizens = () => {
+    if (aiThinking || aiLockRef.current) return;
+    setGame((prev) => {
+      const workedTiles = normalizeWorkedTiles({ ...prev, workedTiles: [] });
+      return { ...prev, workedTiles, message: "总督已按综合粮食、生产与知识产出自动安排市民。" };
+    });
+  };
+
+  const slotPolicy = (policyId: PolicyId | null) => {
+    if (aiThinking || aiLockRef.current) return;
+    if (policyId && !game.completedCivics.includes(POLICIES[policyId].unlockedBy)) return;
+    setGame((prev) => ({
+      ...prev,
+      activePolicy: policyId,
+      message: policyId ? `${POLICIES[policyId].name}已装入政策槽，效果立即生效。` : "政策槽已清空。",
+    }));
+  };
+
+  const handleDiplomaticAction = (action: "trade" | "research" | "sanction") => {
+    if (aiThinking || aiLockRef.current) return;
+    const config = {
+      trade: { cost: 12, relation: 6, message: "阿根廷与巴西建立了 6 回合贸易路线。" },
+      research: { cost: 18, relation: 5, message: "双方启动 4 回合联合研究计划。" },
+      sanction: { cost: 15, relation: -12, message: "阿根廷对巴西实施了 3 回合外交制裁。" },
+    }[action];
+    setGame((prev) => ({
+      ...(() => {
+        const relationshipBlocked = (action === "trade" && prev.brazilRelationship < 40) || (action === "research" && prev.brazilRelationship < 55);
+        const conflictBlocked = action === "sanction"
+          ? prev.tradeRouteTurns > 0 || prev.researchCollaborationTurns > 0 || prev.sanctionTurns > 0
+          : prev.sanctionTurns > 0 || (action === "trade" ? prev.tradeRouteTurns > 0 : prev.researchCollaborationTurns > 0);
+        if (prev.influence < config.cost || relationshipBlocked || conflictBlocked) {
+          const reason = prev.influence < config.cost ? "影响力不足" : relationshipBlocked ? "当前关系等级不足" : "已有冲突或相同外交行动正在进行";
+          return { ...prev, message: `无法执行：${reason}。` };
+        }
+        return {
+          ...prev,
+          influence: prev.influence - config.cost,
+          brazilRelationship: Math.max(0, Math.min(100, prev.brazilRelationship + config.relation)),
+          tradeRouteTurns: action === "trade" ? 6 : prev.tradeRouteTurns,
+          researchCollaborationTurns: action === "research" ? 4 : prev.researchCollaborationTurns,
+          sanctionTurns: action === "sanction" ? 3 : prev.sanctionTurns,
+          message: config.message,
+          log: addLog(prev.log, config.message),
+        };
+      })(),
+    }));
+  };
+
+  const chooseCelebration = (celebrationId: CelebrationId) => {
+    if (aiThinking || aiLockRef.current) return;
+    if (!game.celebrationPending) return;
+    const celebration = CELEBRATIONS[celebrationId];
+    setGame((prev) => ({
+      ...prev,
+      happiness: 0,
+      celebration: celebrationId,
+      celebrationTurns: 4,
+      celebrationPending: false,
+      message: `${celebration.name}开始：${celebration.effect}。`,
+      log: addLog(prev.log, `布宜诺斯艾利斯举办${celebration.name}。`),
+    }));
+  };
+
+  const handleImprove = () => {
+    if (aiThinking || aiLockRef.current) return;
+    if (!selectedUnit || selectedUnit.type !== "builder" || selectedUnit.moves <= 0 || (selectedUnit.charges ?? 0) <= 0 || !selectedBuildImprovement) return;
+    setGame((prev) => {
+      const builder = prev.units.find((unit) => unit.id === prev.selectedUnitId);
+      if (!builder || builder.type !== "builder" || (builder.charges ?? 0) <= 0) return prev;
+      const improvementType = buildableImprovementFor(prev, builder.pos);
+      if (!improvementType) return prev;
+      const tileId = idFor(builder.pos);
+      const improvementName = IMPROVEMENT_INFO[improvementType].name;
+      const charges = (builder.charges ?? 0) - 1;
+      const exhausted = charges <= 0;
+      const units = exhausted
+        ? prev.units.filter((unit) => unit.id !== builder.id)
+        : prev.units.map((unit) => unit.id === builder.id ? { ...unit, moves: 0, charges } : unit);
+      const message = `${improvementName}建设完成；${exhausted ? "建造者已用完全部次数。" : `建造者还剩 ${charges} 次改良。`}`;
+      return {
+        ...prev,
+        builtImprovements: { ...prev.builtImprovements, [tileId]: improvementType },
+        units,
+        selectedUnitId: exhausted ? null : builder.id,
+        selectedTile: tileId,
+        message,
+        log: addLog(prev.log, message),
+      };
+    });
+  };
+
   const handleTileClick = (pos: Position) => {
     if (aiThinking || game.result) return;
+    if (managingCitizens) {
+      const tileId = idFor(pos);
+      setGame((prev) => {
+        if (tileId === idFor(CITY_POS)) return { ...prev, selectedTile: tileId, message: "城市中心固定工作，不占用市民名额。" };
+        if (!prev.discovered.has(tileId) || !isArgentineTerritory(pos)) return { ...prev, selectedTile: tileId, message: "只能指派市民到已探索的城市边界内地块。" };
+        if (terrainAt(pos) === "mountain" || placedProductionAt(prev, tileId)) return { ...prev, selectedTile: tileId, message: "山脉与城市建筑地块不占用市民工作名额。" };
+        const current = normalizeWorkedTiles(prev);
+        if (current.includes(tileId)) return { ...prev, selectedTile: tileId, selectedUnitId: null, message: "这块地已经有市民工作；选择另一块地可进行替换。" };
+        let replaced = "";
+        let workedTiles = [...current, tileId];
+        if (workedTiles.length > prev.population) {
+          const candidates = current.map((id, index) => ({ id, index, score: workedTileScore(prev, id) })).sort((a, b) => a.score - b.score);
+          replaced = candidates[0]?.id ?? current[0];
+          workedTiles = current.filter((id) => id !== replaced).concat(tileId);
+        }
+        return {
+          ...prev,
+          workedTiles,
+          selectedTile: tileId,
+          selectedUnitId: null,
+          message: replaced ? `市民已从${TERRAIN_INFO[terrainAt(posForId(replaced))].label}调到${TERRAIN_INFO[terrainAt(pos)].label}。` : `已指派市民到${TERRAIN_INFO[terrainAt(pos)].label}。`,
+        };
+      });
+      return;
+    }
     if (placingProduction) {
       const tileId = idFor(pos);
       const placementError = productionPlacementError(game, placingProduction, pos);
@@ -762,7 +1139,7 @@ export default function Home() {
         return;
       }
       const item = PRODUCTIONS.find((production) => production.id === placingProduction)!;
-      const adjacency = placementAdjacencyFor(placingProduction, pos);
+      const adjacency = placementAdjacencyFor(game, placingProduction, pos);
       setPlacementCandidate(tileId);
       setGame((prev) => ({ ...prev, selectedTile: tileId, selectedUnitId: null, message: `预览${item.name}：${TERRAIN_INFO[terrainAt(pos)].label}，相邻加成 +${adjacency} ${YIELD_META[item.yield].label}。` }));
       return;
@@ -821,7 +1198,7 @@ export default function Home() {
   };
 
   const handleExplore = () => {
-    if (!selectedUnit || selectedUnit.moves <= 0 || aiThinking || game.result) return;
+    if (!selectedUnit || selectedUnit.type === "builder" || selectedUnit.moves <= 0 || aiThinking || game.result) return;
     setGame((prev) => {
       const unit = prev.units.find((candidate) => candidate.id === prev.selectedUnitId);
       if (!unit || unit.moves <= 0) return prev;
@@ -915,7 +1292,7 @@ export default function Home() {
       setGame((prev) => ({ ...prev, message: `不能在这里建造：${placementError}。` }));
       return;
     }
-    const adjacency = placementAdjacencyFor(placingProduction, pos);
+    const adjacency = placementAdjacencyFor(game, placingProduction, pos);
     const productionId = placingProduction;
     const tileId = placementCandidate;
     setGame((prev) => ({
@@ -961,18 +1338,19 @@ export default function Home() {
   };
 
   const endTurn = useCallback(() => {
-    if (aiLockRef.current || game.result) return;
+    if (aiLockRef.current || game.result || game.celebrationPending) return;
     aiLockRef.current = true;
     setAiThinking(true);
     setGame((prev) => ({ ...prev, message: "巴西正在行动……" }));
 
     aiTimerRef.current = setTimeout(() => {
       setGame((prev) => {
-        const scienceGain = 4 + prev.population + (prev.completedTechs.includes("federalism") ? 2 : 0) + (prev.completedBuildings.includes("academy") ? 2 + completedPlacementBonus(prev, "academy") : 0) + (prev.footballTurns > 0 ? 2 : 0);
-        const cultureGain = 3 + (prev.messiRecruited ? 2 : 0) + (prev.completedBuildings.includes("monument") ? 2 + completedPlacementBonus(prev, "monument") : 0) + (prev.footballTurns > 0 ? 2 : 0);
-        const goldGain = 7 + (prev.footballTurns > 0 ? 3 : 0);
-        const foodGain = 4 + prev.population + (prev.completedTechs.includes("husbandry") ? 1 : 0) + (prev.completedBuildings.includes("granary") ? 2 + completedPlacementBonus(prev, "granary") : 0) + (prev.footballTurns > 0 ? 2 : 0);
-        const productionGain = cityProductionFor(prev);
+        const turnYields = cityYieldTotals(prev);
+        const scienceGain = turnYields.science + (prev.tradeRouteTurns > 0 ? 1 : 0) + (prev.researchCollaborationTurns > 0 ? 2 : 0);
+        const cultureGain = turnYields.culture;
+        const goldGain = turnYields.gold + (prev.tradeRouteTurns > 0 ? 4 : 0);
+        const foodGain = turnYields.food;
+        const productionGain = Math.max(1, turnYields.production);
         let food = prev.food + foodGain;
         let population = prev.population;
         let grew = false;
@@ -994,6 +1372,20 @@ export default function Home() {
             completedTechs.push(activeTechId);
             completedName = tech.name;
             activeTechId = null;
+          }
+        }
+
+        let civicProgress = prev.civicProgress + cultureGain;
+        let activeCivicId = prev.activeCivic;
+        const completedCivics = [...prev.completedCivics];
+        let completedCivicName = "";
+        if (activeCivicId) {
+          const civic = CIVICS.find((item) => item.id === activeCivicId)!;
+          if (civicProgress >= civic.cost) {
+            civicProgress -= civic.cost;
+            if (!completedCivics.includes(activeCivicId)) completedCivics.push(activeCivicId);
+            completedCivicName = civic.name;
+            activeCivicId = null;
           }
         }
 
@@ -1019,7 +1411,13 @@ export default function Home() {
               const deployment = findUnitDeployment({ ...prev, units });
               if (deployment) {
                 const unitId = `${production.unitType}-${nextUnitSerial}`;
-                deployedUnit = { id: unitId, type: production.unitType, pos: deployment, moves: UNIT_INFO[production.unitType].baseMoves };
+                deployedUnit = {
+                  id: unitId,
+                  type: production.unitType,
+                  pos: deployment,
+                  moves: UNIT_INFO[production.unitType].baseMoves,
+                  ...(production.unitType === "builder" ? { charges: 3 } : {}),
+                };
                 units = [...units, deployedUnit];
                 nextUnitSerial += 1;
                 selectedUnitId = unitId;
@@ -1036,10 +1434,23 @@ export default function Home() {
         }
 
         const footballTurns = Math.max(0, prev.footballTurns - 1);
+        const tradeRouteTurns = Math.max(0, prev.tradeRouteTurns - 1);
+        const researchCollaborationTurns = Math.max(0, prev.researchCollaborationTurns - 1);
+        const sanctionTurns = Math.max(0, prev.sanctionTurns - 1);
+        const celebrationTurns = Math.max(0, prev.celebrationTurns - 1);
+        const celebration = celebrationTurns > 0 ? prev.celebration : null;
         const greatPointGain = 3 + Math.floor(population / 2) + (completedTechs.includes("broadcast") ? 2 : 0);
-        const brazilInfluence = prev.brazilInfluence + 4 + (grew ? 1 : 0);
+        const influenceGain = influenceGainFor(prev);
+        const influence = prev.influence + influenceGain;
+        const brazilRelationship = Math.max(0, Math.min(100, prev.brazilRelationship + (prev.tradeRouteTurns > 0 ? 1 : 0) - (prev.sanctionTurns > 0 ? 1 : 0)));
+        const brazilInfluenceGain = Math.max(1, 4 + (grew ? 1 : 0) - (prev.sanctionTurns > 0 ? 2 : 0) - (brazilRelationship >= 75 ? 1 : 0));
+        const brazilInfluence = prev.brazilInfluence + brazilInfluenceGain;
+        const happinessGain = happinessGainFor(prev, population, completedBuildings.length, brazilRelationship);
+        const happiness = Math.min(HAPPINESS_TARGET, prev.happiness + happinessGain);
+        const celebrationPending = prev.celebrationPending || (happiness >= HAPPINESS_TARGET && celebrationTurns === 0);
         const nextTurn = prev.turn + 1;
         units = units.map((unit) => ({ ...unit, moves: maxMovesForUnit(unit.type, completedTechs, footballTurns) }));
+        const workedTiles = normalizeWorkedTiles({ ...prev, population, completedBuildings, completedTechs, completedCivics, activePolicy: prev.activePolicy }, population);
         const recruited = prev.messiRecruited;
         const won = population >= 5 && completedTechs.length >= 2 && prev.discovered.size >= EXPLORE_TARGET && recruited;
         const lost = brazilInfluence >= 100;
@@ -1047,7 +1458,7 @@ export default function Home() {
         if (completedProduction) {
           if (completedProduction.kind === "building") {
             const placement = prev.buildingPlacements[completedProduction.id];
-            const adjacency = placement ? placementAdjacencyFor(completedProduction.id, posForId(placement)) : 0;
+            const adjacency = placement ? placementAdjacencyFor(prev, completedProduction.id, posForId(placement)) : 0;
             turnEvents.push(`布宜诺斯艾利斯完成了${completedProduction.name}：${completedProduction.effect}，相邻加成 +${adjacency} ${YIELD_META[completedProduction.yield].label}。`);
           } else if (deployedUnit) {
             turnEvents.push(`${completedProduction.name}训练完成，已自动部署到首都${idFor(deployedUnit.pos) === idFor(CITY_POS) ? "中心" : "相邻空格"}。`);
@@ -1055,7 +1466,9 @@ export default function Home() {
         }
         if (deploymentBlocked) turnEvents.push("单位训练已完成，但首都附近没有合法部署空格；进度会保留到空位出现。");
         if (completedName) turnEvents.push(`完成科技：${completedName}。请选择下一项研究。`);
+        if (completedCivicName) turnEvents.push(`完成市政：${completedCivicName}。新政策已经解锁。`);
         if (grew) turnEvents.push(`布宜诺斯艾利斯增长到 ${population} 人口！`);
+        if (celebrationPending && !prev.celebrationPending) turnEvents.push("城市幸福度已满！请先选择一项庆典奖励。");
         const summary = turnEvents.length ? turnEvents.join(" ") : `第 ${nextTurn} 回合开始，所有单位恢复行动。`;
 
         return {
@@ -1067,9 +1480,13 @@ export default function Home() {
           greatPoints: prev.greatPoints + greatPointGain,
           food,
           population,
+          workedTiles,
           activeTech: activeTechId,
           techProgress,
           completedTechs,
+          activeCivic: activeCivicId,
+          civicProgress,
+          completedCivics,
           activeProduction: activeProductionId,
           productionProgress,
           completedBuildings,
@@ -1077,8 +1494,17 @@ export default function Home() {
           selectedUnitId,
           selectedTile,
           nextUnitSerial,
-          brazilPos: nextBrazilPosition(prev),
+          brazilPos: nextBrazilPosition({ ...prev, units }),
           brazilInfluence,
+          influence,
+          brazilRelationship,
+          tradeRouteTurns,
+          researchCollaborationTurns,
+          sanctionTurns,
+          happiness,
+          celebration,
+          celebrationTurns,
+          celebrationPending,
           footballTurns,
           message: summary,
           log: addLog(prev.log, summary),
@@ -1088,10 +1514,16 @@ export default function Home() {
       aiLockRef.current = false;
       setAiThinking(false);
     }, 650);
-  }, [game.result]);
+  }, [game.celebrationPending, game.result]);
 
   const requestEndTurn = useCallback(() => {
-    if (aiThinking || game.result || techPickerOpen || productionDrawerOpen || placingProduction) return;
+    if (aiThinking || game.result || techPickerOpen || productionDrawerOpen || strategyDrawerOpen || placingProduction) return;
+    if (game.celebrationPending) {
+      setStrategyTab("happiness");
+      setStrategyDrawerOpen(true);
+      setGame((prev) => ({ ...prev, message: "幸福度已满，请先选择本次城市庆典。" }));
+      return;
+    }
     if (!game.activeProduction && !productionReminderBypassed) {
       setGame((prev) => ({
         ...prev,
@@ -1104,7 +1536,7 @@ export default function Home() {
     }
     setProductionReminderBypassed(false);
     endTurn();
-  }, [aiThinking, endTurn, game.activeProduction, game.result, placingProduction, productionDrawerOpen, productionReminderBypassed, techPickerOpen]);
+  }, [aiThinking, endTurn, game.activeProduction, game.celebrationPending, game.result, placingProduction, productionDrawerOpen, productionReminderBypassed, strategyDrawerOpen, techPickerOpen]);
 
   useEffect(() => {
     const frame = requestAnimationFrame(() => focusMapOn(CITY_POS, "auto"));
@@ -1142,6 +1574,8 @@ export default function Home() {
           setGame((prev) => ({ ...prev, selectedTile: idFor(CITY_POS), message: "已取消建筑选址，返回生产列表。" }));
         } else if (productionDrawerOpen) {
           setProductionDrawerOpen(false);
+        } else if (strategyDrawerOpen) {
+          setStrategyDrawerOpen(false);
         } else {
           setTechPickerOpen(false);
         }
@@ -1149,7 +1583,7 @@ export default function Home() {
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [pendingSystemAction, placingProduction, productionDrawerOpen, requestEndTurn]);
+  }, [pendingSystemAction, placingProduction, productionDrawerOpen, requestEndTurn, strategyDrawerOpen]);
 
   useEffect(() => () => {
     if (aiTimerRef.current) clearTimeout(aiTimerRef.current);
@@ -1208,10 +1642,12 @@ export default function Home() {
   };
 
   const techPercent = activeTech ? Math.min(100, (game.techProgress / activeTech.cost) * 100) : 0;
+  const civicPercent = activeCivic ? Math.min(100, (game.civicProgress / activeCivic.cost) * 100) : 0;
   const productionPercent = activeProduction ? Math.min(100, activeProductionProgress / activeProduction.cost * 100) : 0;
   const cityGrowthTarget = 10 + game.population * 4;
-  const sciencePerTurn = 4 + game.population + (game.completedTechs.includes("federalism") ? 2 : 0) + (game.completedBuildings.includes("academy") ? 2 + completedPlacementBonus(game, "academy") : 0) + (game.footballTurns > 0 ? 2 : 0);
-  const culturePerTurn = 3 + (game.messiRecruited ? 2 : 0) + (game.completedBuildings.includes("monument") ? 2 + completedPlacementBonus(game, "monument") : 0) + (game.footballTurns > 0 ? 2 : 0);
+  const sciencePerTurn = cityYields.science + (game.tradeRouteTurns > 0 ? 1 : 0) + (game.researchCollaborationTurns > 0 ? 2 : 0);
+  const culturePerTurn = cityYields.culture;
+  const goldPerTurn = cityYields.gold + (game.tradeRouteTurns > 0 ? 4 : 0);
   const cityTileLeft = CITY_POS.col * 70;
   const cityTileTop = CITY_POS.row * 82 + (CITY_POS.col % 2) * 41;
   const cityStyle = { left: cityTileLeft - 39, top: cityTileTop + 57 };
@@ -1238,9 +1674,10 @@ export default function Home() {
           <span className="civ-chip">🇦🇷 阿根廷</span>
         </div>
         <div className="resource-strip" aria-label="文明资源">
-          <span><b className="gold">●</b><small>金币</small><strong>{game.gold}</strong><em>+7</em></span>
+          <span><b className="gold">●</b><small>金币</small><strong>{game.gold}</strong><em>+{goldPerTurn}</em></span>
           <span><b className="science">◆</b><small>科技</small><strong>{game.science}</strong><em>+{sciencePerTurn}</em></span>
           <span><b className="culture">✦</b><small>文化</small><strong>{game.culture}</strong><em>+{culturePerTurn}</em></span>
+          <span><b className="influence">◇</b><small>影响力</small><strong>{game.influence}</strong><em>+{influencePerTurn}</em></span>
           <span><b className="people">★</b><small>伟人</small><strong>{game.greatPoints}</strong><em>/ 30</em></span>
         </div>
         <div className="turn-indicator"><small>探索时代</small><strong>回合 {game.turn}</strong></div>
@@ -1264,8 +1701,15 @@ export default function Home() {
             <div className="progress-ring" style={{ "--progress": `${techPercent}%` } as CSSProperties}>
               <div><strong>{game.techProgress}</strong><span>/ {activeTech?.cost ?? "—"}</span></div>
             </div>
-            <div className="progress-copy"><span>预计完成</span><strong>{activeTech ? `${Math.max(1, Math.ceil((activeTech.cost - game.techProgress) / (4 + game.population)))} 回合` : "等待选择"}</strong></div>
-            <button className="tech-change" onClick={() => { closeProductionDrawer(); setTechPickerOpen(true); }} data-testid="open-tech-picker">{activeTech ? "更换研究" : "选择下一项研究"}</button>
+            <div className="progress-copy"><span>预计完成</span><strong>{activeTech ? `${Math.max(1, Math.ceil((activeTech.cost - game.techProgress) / Math.max(1, sciencePerTurn)))} 回合` : "等待选择"}</strong></div>
+            <button className="tech-change" onClick={() => { closeProductionDrawer(); setStrategyDrawerOpen(false); setTechPickerOpen(true); }} data-testid="open-tech-picker">{activeTech ? "更换研究" : "选择下一项研究"}</button>
+          </section>
+
+          <section className="paper-card civic-compact-card">
+            <div className="card-kicker">文化与市政</div>
+            <div className="civic-compact-heading"><span>{activeCivic?.icon ?? "⚖"}</span><div><strong>{activeCivic?.name ?? "选择下一项市政"}</strong><small>{activeCivic?.effect ?? "用文化解锁政策卡"}</small></div></div>
+            <div className="civic-compact-progress"><i><em style={{ width: `${civicPercent}%` }} /></i><b>{game.civicProgress}/{activeCivic?.cost ?? "—"}</b></div>
+            <button onClick={() => openStrategy("civics")} data-testid="open-civics">市政树与政策 ›</button>
           </section>
 
           <section className="paper-card mission-card">
@@ -1281,17 +1725,18 @@ export default function Home() {
             <div className="card-kicker">当前选择</div>
             <div className="selection-heading">
               <span className={`selection-swatch ${selectedKnown ? selectedTerrain : "unknown"}`} aria-hidden="true"><i /></span>
-              <div><h3>{!selectedKnown ? "未知区域" : selectedIsBrazilCity ? "里约热内卢" : selectedPlacedProduction?.name ?? selectedImprovement?.name ?? selectedYield.label}</h3><p>{!selectedKnown ? "战争迷雾覆盖，尚无地形情报" : selectedIsBrazilCity ? `巴西首都 · 人口 ${brazilPopulation}` : selectedPlacedProduction ? `${selectedYield.label}上的城市建筑 · ${selectedPlacedStatus}` : selectedImprovement ? `${selectedYield.label}上的改良设施` : "未改良地块"}</p></div>
+              <div><h3>{!selectedKnown ? "未知区域" : selectedIsBrazilCity ? "里约热内卢" : selectedPlacedProduction?.name ?? selectedImprovement?.name ?? selectedResource?.name ?? TERRAIN_INFO[selectedTerrain].label}</h3><p>{!selectedKnown ? "战争迷雾覆盖，尚无地形情报" : selectedIsBrazilCity ? `巴西首都 · 人口 ${brazilPopulation}` : selectedPlacedProduction ? `${TERRAIN_INFO[selectedTerrain].label}上的城市建筑 · ${selectedPlacedStatus}` : selectedImprovement ? `${TERRAIN_INFO[selectedTerrain].label}上的改良设施` : selectedResource ? `${TERRAIN_INFO[selectedTerrain].label}上的资源 · 需要${IMPROVEMENT_INFO[selectedResource.improvement].name}` : "未改良地块"}</p></div>
             </div>
             <div className="selection-meta"><span>{!selectedKnown ? "未知领土" : selectedIsBrazilCity ? "巴西文明" : isArgentineTerritory(selectedPos) ? "阿根廷领土" : isBrazilianTerritory(selectedPos) ? "巴西领土" : "中立地块"}</span><b>{!selectedKnown ? "无情报" : selectedIsBrazilCity ? "文明总产出/回合" : selectedPlacedStatus ?? (selectedImprovement ? "已建设" : "自然地貌")}</b></div>
             <div><span><i className="yield-dot food">粮</i>食物</span><b>{!selectedKnown ? "?" : selectedIsBrazilCity ? `+${brazilYields.food}` : selectedYield.food}</b></div>
             <div><span><i className="yield-dot production">锤</i>生产</span><b>{!selectedKnown ? "?" : selectedIsBrazilCity ? `+${brazilYields.production}` : selectedYield.production}</b></div>
             <div><span><i className="yield-dot science">科</i>科技</span><b>{!selectedKnown ? "?" : selectedIsBrazilCity ? `+${brazilYields.science}` : selectedYield.science}</b></div>
             <div><span><i className="yield-dot culture">文</i>文化</span><b>{!selectedKnown ? "?" : selectedIsBrazilCity ? `+${brazilYields.culture}` : selectedYield.culture}</b></div>
+            <div><span><i className="yield-dot gold">金</i>金币</span><b>{!selectedKnown ? "?" : selectedIsBrazilCity ? "—" : selectedYield.gold}</b></div>
           </section>
         </aside>
 
-        <section className={`map-stage ${placingProduction ? "placement-lens" : ""}`} aria-label="世界地图">
+        <section className={`map-stage ${placingProduction ? "placement-lens" : ""} ${managingCitizens ? "citizen-manage" : ""}`} aria-label="世界地图">
           <div className="map-wash map-wash-one" />
           <div className="map-wash map-wash-two" />
           <div className="map-focus-controls" aria-label="地图定位">
@@ -1306,6 +1751,7 @@ export default function Home() {
             </button>
           </div>
           {placingItem && <div className="placement-lens-banner" role="status"><span>{placingItem.icon}</span><div><b>为{placingItem.name}选择地块</b><small>绿色六角格可以建造 · 点击后在右侧确认</small></div><kbd>Esc 取消</kbd></div>}
+          {managingCitizens && <div className="placement-lens-banner citizen-banner" role="status"><span>市</span><div><b>调整首都工作地块</b><small>亮蓝地块正在工作 · 点击边界内其他地块进行替换</small></div><kbd>右侧完成</kbd></div>}
           <div
             ref={mapViewportRef}
             className={`map-viewport ${mapDragging ? "dragging" : ""}`}
@@ -1326,6 +1772,7 @@ export default function Home() {
               <path d={ARGENTINA_EDGE_PATH} className="territory-edge argentina" />
               <path d={BRAZIL_EDGE_PATH} className="territory-edge brazil" />
             </svg>
+            {game.tradeRouteTurns > 0 && <svg className="trade-route-layer" viewBox={`0 0 ${BOARD_WIDTH} ${BOARD_HEIGHT}`} aria-hidden="true"><path d={TRADE_ROUTE_PATH} className="trade-route-shadow" /><path d={TRADE_ROUTE_PATH} className="trade-route" /></svg>}
             {tiles.map(({ terrain, col, row }) => {
               const pos = { col, row };
               const tileId = idFor(pos);
@@ -1337,7 +1784,9 @@ export default function Home() {
               const selected = game.selectedTile === tileId;
               const owned = isArgentineTerritory(pos);
               const rival = isBrazilianTerritory(pos);
-              const improvement = IMPROVEMENTS[tileId];
+              const improvement = improvementAt(game, tileId);
+              const resourceId = RESOURCE_TILES[tileId] ?? null;
+              const resource = resourceId ? RESOURCE_INFO[resourceId] : null;
               const placedProductionId = placedProductionByTile.get(tileId) ?? null;
               const placedProduction = PRODUCTIONS.find((item): item is BuildingProject => item.id === placedProductionId && item.kind === "building") ?? null;
               const buildingCompleted = placedProductionId ? game.completedBuildings.includes(placedProductionId) : false;
@@ -1348,9 +1797,11 @@ export default function Home() {
               const placementCandidateSelected = placementCandidate === tileId;
               const placementFeatured = placementValid && placementOption!.adjacency === bestPlacementAdjacency && bestPlacementAdjacency > 0;
               const tileYield = yieldsFor(pos);
+              const citizenWorked = game.workedTiles.includes(tileId);
+              const citizenAssignable = managingCitizens && discovered && owned && tileId !== idFor(CITY_POS) && terrain !== "mountain" && !placedProduction;
               const friendlyUnit = game.units.find((unit) => tileId === idFor(unit.pos));
               const containsUnit = friendlyUnit ? `，${UNIT_INFO[friendlyUnit.type].name}在此` : tileId === idFor(game.brazilPos) && rivalScoutVisible ? "，巴西斥候在此" : "";
-              const yieldLabel = discovered ? `，粮食 ${tileYield.food}，生产 ${tileYield.production}，科技 ${tileYield.science}，文化 ${tileYield.culture}` : "";
+              const yieldLabel = discovered ? `，粮食 ${tileYield.food}，生产 ${tileYield.production}，科技 ${tileYield.science}，文化 ${tileYield.culture}，金币 ${tileYield.gold}` : "";
               const tileName = placedProduction ? `${placedProduction.name}，位于${info.label}，${buildingCompleted ? "已建成" : "建造中"}` : improvement ? `${improvement.name}，位于${info.label}` : info.label;
               const placementLabel = placingItem
                 ? placementValid
@@ -1359,7 +1810,7 @@ export default function Home() {
                 : "";
               return (
                 <button
-                  className={`hex-tile ${terrain} ${owned ? "owned" : ""} ${rival ? "rival" : ""} ${discovered ? visible ? "visible" : "surveyed" : "fog"} ${reachable ? "reachable" : ""} ${selected && !placingProduction ? "selected" : ""} ${game.footballTurns > 0 && discovered && owned ? "football-benefit" : ""} ${placedProduction ? "has-city-building" : ""} ${buildingUnderConstruction ? "construction-site" : ""} ${placementValid ? "placement-valid" : ""} ${placementInvalid ? "placement-invalid" : ""} ${placingItem && !placementValid && !placementInvalid ? "placement-dim" : ""} ${placementCandidateSelected ? "placement-candidate" : ""}`}
+                  className={`hex-tile ${terrain} ${owned ? "owned" : ""} ${rival ? "rival" : ""} ${discovered ? visible ? "visible" : "surveyed" : "fog"} ${reachable ? "reachable" : ""} ${selected && !placingProduction ? "selected" : ""} ${game.footballTurns > 0 && discovered && owned ? "football-benefit" : ""} ${placedProduction ? "has-city-building" : ""} ${buildingUnderConstruction ? "construction-site" : ""} ${placementValid ? "placement-valid" : ""} ${placementInvalid ? "placement-invalid" : ""} ${placingItem && !placementValid && !placementInvalid ? "placement-dim" : ""} ${placementCandidateSelected ? "placement-candidate" : ""} ${managingCitizens ? "citizen-manage" : ""} ${citizenAssignable ? "citizen-available" : ""} ${citizenWorked ? "citizen-worked" : ""}`}
                   key={tileId}
                   style={{ left: col * 70, top: row * 82 + (col % 2) * 41 }}
                   aria-label={`${discovered ? tileName : "未知"}地块，第 ${row + 1} 行第 ${col + 1} 列${yieldLabel}${containsUnit}${reachable ? `，可以移动，需要 ${moveCost} 点移动力` : ""}${placementLabel}`}
@@ -1382,17 +1833,20 @@ export default function Home() {
                   ) : (
                     <span className="fog-mark" aria-hidden="true">?</span>
                   )}
+                  {discovered && resource && !placedProduction && <span className={`resource-badge ${resourceId}`} aria-label={resource.name}>{resource.icon}</span>}
                   {discovered && (
                     <span className={`tile-yields ${showYields || Boolean(placingProduction) ? "visible" : ""}`} aria-hidden="true">
                       {tileYield.food > 0 && <i className="food">粮<b>{tileYield.food}</b></i>}
                       {tileYield.production > 0 && <i className="production">锤<b>{tileYield.production}</b></i>}
                       {tileYield.science > 0 && <i className="science">科<b>{tileYield.science}</b></i>}
                       {tileYield.culture > 0 && <i className="culture">文<b>{tileYield.culture}</b></i>}
+                      {tileYield.gold > 0 && <i className="gold">金<b>{tileYield.gold}</b></i>}
                     </span>
                   )}
                   {reachable && <span className="move-overlay" aria-hidden="true"><svg className="hex-ring" viewBox="0 0 100 100" preserveAspectRatio="none"><polygon points="25,2 75,2 98,50 75,98 25,98 2,50" /></svg><i /><b>{moveCost}</b></span>}
                   {placementValid && placingItem && <span className={`placement-overlay ${placementFeatured ? "featured" : ""} ${placementCandidateSelected ? "candidate" : ""}`} aria-hidden="true"><svg className="hex-ring" viewBox="0 0 100 100" preserveAspectRatio="none"><polygon points="25,2 75,2 98,50 75,98 25,98 2,50" /></svg><b>{placementCandidateSelected ? "✓" : `+${2 + placementOption!.adjacency}${YIELD_META[placingItem.yield].symbol}`}</b><small>{placementCandidateSelected ? "已选择" : placementFeatured ? "高收益" : "可建造"}</small></span>}
                   {placementInvalid && <span className="placement-invalid-mark" aria-hidden="true">×</span>}
+                  {citizenAssignable && <span className={`worked-marker ${citizenWorked ? "active" : ""}`} aria-hidden="true">{citizenWorked ? "市" : "+"}</span>}
                   {selected && !placingProduction && <span className="selection-overlay" aria-hidden="true"><svg className="hex-ring" viewBox="0 0 100 100" preserveAspectRatio="none"><polygon points="25,2 75,2 98,50 75,98 25,98 2,50" /></svg></span>}
                 </button>
               );
@@ -1410,8 +1864,8 @@ export default function Home() {
               const info = UNIT_INFO[unit.type];
               const cityGarrison = idFor(unit.pos) === idFor(CITY_POS);
               const unitStyle = { left: unit.pos.col * 70 + 22, top: unit.pos.row * 82 + (unit.pos.col % 2) * 41 + (cityGarrison ? 5 : 15) };
-              return <button key={unit.id} className={`map-piece unit-piece trained-unit-piece ${unit.type}-piece ${cityGarrison ? "city-garrison" : ""} ${game.selectedUnitId === unit.id ? "piece-selected" : ""} ${placingProduction ? "placement-locked" : ""}`} style={unitStyle} aria-label={`${info.name}，${unit.moves} 点移动力`} data-testid={unit.id === "gaucho-1" ? "gaucho-unit" : `unit-${unit.id}`} onClick={() => setGame((prev) => ({ ...prev, selectedUnitId: unit.id, selectedTile: idFor(unit.pos), message: `${info.name}已选择；绿色六角格是本回合可达范围。` }))} disabled={Boolean(placingProduction)}>
-                <span className={`unit-token ${unit.type}`} aria-hidden="true"><b>{info.short}</b><small>{unit.moves}</small></span>
+              return <button key={unit.id} className={`map-piece unit-piece trained-unit-piece ${unit.type}-piece ${cityGarrison ? "city-garrison" : ""} ${game.selectedUnitId === unit.id ? "piece-selected" : ""} ${placingProduction ? "placement-locked" : ""}`} style={unitStyle} aria-label={`${info.name}，${unit.moves} 点移动力${unit.type === "builder" ? `，剩余 ${unit.charges ?? 0} 次改良` : ""}`} data-testid={unit.id === "gaucho-1" ? "gaucho-unit" : `unit-${unit.id}`} onClick={() => { setStrategyDrawerOpen(false); setGame((prev) => ({ ...prev, selectedUnitId: unit.id, selectedTile: idFor(unit.pos), message: `${info.name}已选择；绿色六角格是本回合可达范围。` })); }} disabled={Boolean(placingProduction)}>
+                <span className={`unit-token ${unit.type}`} aria-hidden="true"><b>{info.short}</b><small>{unit.type === "builder" ? unit.charges : unit.moves}</small></span>
                 <span className="unit-label">{info.name}</span>
               </button>;
             })}
@@ -1447,6 +1901,8 @@ export default function Home() {
             <div className="trait"><span>太阳五月</span><b>草原文化 +1</b></div>
             <div className="trait"><span>潘帕斯牧场</span><b>骑乘单位 +1 移动</b></div>
             <div className="city-growth"><span>首都成长</span><b>{game.food}/{cityGrowthTarget} 食物</b><i><em style={{ width: `${Math.min(100, game.food / cityGrowthTarget * 100)}%` }} /></i></div>
+            <div className="city-growth happiness-track"><span>城市幸福度</span><b>{game.happiness}/{HAPPINESS_TARGET} · +{happinessPerTurn}</b><i><em style={{ width: `${Math.min(100, game.happiness / HAPPINESS_TARGET * 100)}%` }} /></i></div>
+            <div className="city-management-actions"><button onClick={() => openStrategy("citizens")} data-testid="manage-citizens">市民与地块</button><button onClick={() => openStrategy("happiness")} className={game.celebrationPending ? "attention" : ""} data-testid="open-happiness">{game.celebrationPending ? "选择庆典！" : "幸福与庆典"}</button></div>
             <button className={`city-production-summary ${activeProduction ? "active" : "idle"}`} onClick={openCapitalProduction} disabled={aiThinking || Boolean(game.result)} data-testid="open-production-picker">
               <span className="production-summary-icon" aria-hidden="true">⚒</span>
               <span className="production-summary-copy"><small>首都生产 · +{productionPerTurn} 锤/回合</small><strong>{activeProduction?.name ?? (hasAvailableProduction ? "待安排生产" : "全部项目已完成")}</strong>{activeProduction && <i><em style={{ width: `${productionPercent}%` }} /></i>}</span>
@@ -1496,8 +1952,9 @@ export default function Home() {
             <div className="mini-map-legend" aria-hidden="true"><span><i className="argentina" />阿根廷领土</span><span><i className="brazil" />巴西领土</span><span><i className="surveyed" />已探索</span><span><i className="fog" />未探索</span></div>
             <p className="world-threat-copy">蓝色连续外缘是布宜诺斯艾利斯城市边界，绿黄色外缘是里约热内卢城市边界；两国首都相距 <b>{CAPITAL_DISTANCE}</b> 格。</p>
             <button className="locate-rival" onClick={() => { setGame((prev) => ({ ...prev, selectedUnitId: null, selectedTile: idFor(BRAZIL_CITY_POS), message: `已定位巴西首都；距离我国首都 ${CAPITAL_DISTANCE} 格。` })); focusMapOn(BRAZIL_CITY_POS); }} disabled={aiThinking || Boolean(placingProduction)} data-testid="locate-brazil">⌖ 定位巴西首都 · {CAPITAL_DISTANCE} 格</button>
+            <button className="locate-rival diplomacy-open" onClick={() => openStrategy("diplomacy")} disabled={aiThinking || Boolean(placingProduction)} data-testid="open-diplomacy">◇ 外交与贸易 · 影响力 {game.influence}</button>
             <div className="diplomacy-row"><span><b className="avatar argentina">A</b>阿根廷</span><em>你</em></div>
-            <div className="diplomacy-row"><span><b className="avatar brazil">B</b>巴西</span><em>{aiThinking ? "行动中" : "已接触"}</em></div>
+            <div className="diplomacy-row"><span><b className="avatar brazil">B</b>巴西</span><em>{aiThinking ? "行动中" : `${relationshipLabel} · ${game.brazilRelationship}`}</em></div>
             <div className="foreign-yield-ribbon" aria-label={`巴西文明每回合总产出：食物 ${brazilYields.food}，生产 ${brazilYields.production}，科技 ${brazilYields.science}，文化 ${brazilYields.culture}`}>
               <div><strong>巴西总产出</strong><small>始终显示 · 每回合</small></div>
               <span className="food">粮 <b>+{brazilYields.food}</b></span><span className="production">锤 <b>+{brazilYields.production}</b></span><span className="science">科 <b>+{brazilYields.science}</b></span><span className="culture">文 <b>+{brazilYields.culture}</b></span>
@@ -1526,7 +1983,7 @@ export default function Home() {
       <div className={`action-dock ${citySelected ? "city-mode" : ""} ${brazilCitySelected ? "foreign-mode" : ""} ${placingProduction ? "placement-hidden" : ""}`} role="region" aria-label={citySelected ? "首都生产操作" : brazilCitySelected ? "巴西文明情报" : "选中单位操作"}>
         <div className="selected-unit">
           <span className="unit-portrait" aria-hidden="true">{selectedUnitInfo?.short ?? (citySelected ? "★" : brazilCitySelected ? "◆" : selectedKnown ? "⌖" : "?")}</span>
-          <div className="selected-copy"><small>{selectedUnit ? "● 单位已选择" : citySelected ? "● 首都已选择" : brazilCitySelected ? "● 外国首都已选择" : selectedKnown ? "当前地块" : "● 未知区域"}</small><strong>{selectedUnitInfo?.name ?? (citySelected ? "布宜诺斯艾利斯" : brazilCitySelected ? "里约热内卢" : selectedKnown ? selectedImprovement?.name ?? selectedYield.label : "战争迷雾")}</strong>{selectedUnit && <span className="movement-pips" aria-label={`${selectedUnit.moves} / ${maxMoves} 移动力`}>{Array.from({ length: maxMoves }, (_, index) => <i className={index < selectedUnit.moves ? "available" : "spent"} key={index} />)}<b>{selectedUnit.moves}/{maxMoves}</b></span>}<span>{selectedUnit ? selectedUnit.moves > 0 ? "选择绿色六角格移动" : "本回合移动力已用完" : citySelected ? `人口 ${game.population} · +${productionPerTurn} 锤/回合` : brazilCitySelected ? `巴西人口 ${brazilPopulation} · 距我国首都 ${CAPITAL_DISTANCE} 格` : selectedKnown ? "点击单位或首都下达命令" : "派侦察单位靠近以获取情报"}</span></div>
+          <div className="selected-copy"><small>{selectedUnit ? "● 单位已选择" : citySelected ? "● 首都已选择" : brazilCitySelected ? "● 外国首都已选择" : selectedKnown ? "当前地块" : "● 未知区域"}</small><strong>{selectedUnitInfo?.name ?? (citySelected ? "布宜诺斯艾利斯" : brazilCitySelected ? "里约热内卢" : selectedKnown ? selectedImprovement?.name ?? selectedResource?.name ?? TERRAIN_INFO[selectedTerrain].label : "战争迷雾")}</strong>{selectedUnit && <span className="movement-pips" aria-label={`${selectedUnit.moves} / ${maxMoves} 移动力`}>{Array.from({ length: maxMoves }, (_, index) => <i className={index < selectedUnit.moves ? "available" : "spent"} key={index} />)}<b>{selectedUnit.moves}/{maxMoves}</b></span>}<span>{selectedUnit ? selectedUnit.type === "builder" ? `${selectedUnit.charges ?? 0} 次改良 · ${selectedUnit.moves > 0 ? "移动到境内地块建设设施" : "本回合已行动"}` : selectedUnit.moves > 0 ? "选择绿色六角格移动" : "本回合移动力已用完" : citySelected ? `人口 ${game.population} · +${productionPerTurn} 锤/回合` : brazilCitySelected ? `巴西人口 ${brazilPopulation} · 距我国首都 ${CAPITAL_DISTANCE} 格` : selectedKnown ? "点击单位或首都下达命令" : "派侦察单位靠近以获取情报"}</span></div>
         </div>
         {citySelected ? (
           <div className="city-production-dock">
@@ -1540,15 +1997,16 @@ export default function Home() {
           </div>
         ) : (
           <div className="action-buttons">
+            {selectedUnit?.type === "builder" && <button className="builder-action" disabled={!selectedBuildImprovement || selectedUnit.moves <= 0 || aiThinking} onClick={handleImprove} data-testid="build-improvement"><b>⚒</b><span>{selectedBuildImprovement ? `建设${IMPROVEMENT_INFO[selectedBuildImprovement].name}` : "无可建改良"}</span></button>}
             <button disabled={!selectedUnit || selectedUnit.moves <= 0 || aiThinking} onClick={() => setGame((prev) => ({ ...prev, message: "请选择带白色落点的绿色六角格；数字表示需要的移动力。" }))}><b>⌖</b><span>移动</span></button>
-            <button disabled={!selectedUnit || selectedUnit.moves <= 0 || aiThinking} onClick={handleExplore} data-testid="explore-action"><b>◉</b><span>侦察</span></button>
+            <button disabled={!selectedUnit || selectedUnit.type === "builder" || selectedUnit.moves <= 0 || aiThinking} onClick={handleExplore} data-testid="explore-action"><b>◉</b><span>侦察</span></button>
             <button disabled={!selectedUnit || selectedUnit.moves <= 0 || aiThinking} onClick={handleWait}><b>⚑</b><span>驻扎</span></button>
             <button disabled={!selectedUnit || selectedUnit.moves <= 0 || aiThinking} onClick={handleWait}><b>↶</b><span>休整</span></button>
           </div>
         )}
       </div>
 
-      <button className="end-turn-button" onClick={requestEndTurn} disabled={aiThinking || Boolean(game.result) || Boolean(placingProduction) || productionDrawerOpen} data-testid="end-turn"><span>{aiThinking ? "巴西行动中" : placingProduction ? "请选择地块" : "结束回合"}</span><small>Enter</small></button>
+      <button className="end-turn-button" onClick={requestEndTurn} disabled={aiThinking || Boolean(game.result) || Boolean(placingProduction) || productionDrawerOpen || strategyDrawerOpen} data-testid="end-turn"><span>{aiThinking ? "巴西行动中" : game.celebrationPending ? "先选择庆典" : placingProduction ? "请选择地块" : "结束回合"}</span><small>Enter</small></button>
 
       <div className="event-toast" role="status" aria-live="polite">{game.message}</div>
 
@@ -1609,7 +2067,7 @@ export default function Home() {
           </div>
         ) : (
           <div className="production-choice-view">
-            <div className="production-category-heading"><div><span>▾</span><strong>{productionCategory === "buildings" ? "建筑与城区" : "训练单位"}</strong></div><small>{productionCategory === "buildings" ? `${PRODUCTIONS.filter((item) => item.kind === "building").length - game.completedBuildings.length} 项未完成` : "2 项可重复训练"}</small></div>
+            <div className="production-category-heading"><div><span>▾</span><strong>{productionCategory === "buildings" ? "建筑与城区" : "训练单位"}</strong></div><small>{productionCategory === "buildings" ? `${PRODUCTIONS.filter((item) => item.kind === "building").length - game.completedBuildings.length} 项未完成` : "3 项可重复训练"}</small></div>
             <section className={`production-list-section ${productionCategory}`}>
             <div className="production-list">
               {PRODUCTIONS.filter((production) => productionCategory === "buildings" ? production.kind === "building" : production.kind === "unit").map((production) => {
@@ -1626,6 +2084,83 @@ export default function Home() {
             <button className="production-skip" onClick={() => { setProductionReminderBypassed(true); setProductionDrawerOpen(false); setGame((prev) => ({ ...prev, message: "本回合暂不生产；再次点击结束回合即可继续。" })); }}>本回合暂不生产</button>
           </div>
         )}
+      </aside>
+
+      <aside className={`strategy-drawer ${strategyDrawerOpen ? "open" : ""}`} role="dialog" aria-modal="false" aria-labelledby="strategy-title" aria-hidden={!strategyDrawerOpen}>
+        <header className="strategy-header">
+          <div><span>帝国管理</span><h2 id="strategy-title">{strategyTab === "citizens" ? "布宜诺斯艾利斯" : strategyTab === "civics" ? "市政与政策" : strategyTab === "diplomacy" ? "阿根廷外交部" : "幸福与庆典"}</h2><p>{strategyTab === "citizens" ? "每名市民工作一个地块；城市中心固定产出。" : strategyTab === "civics" ? "文化推进市政，完成后将一张政策装入政府槽位。" : strategyTab === "diplomacy" ? "影响力是每回合积累、用于国际行动的外交货币。" : "幸福度达到上限后，选择一种持续四回合的庆典。"}</p></div>
+          <button className="drawer-close" onClick={() => setStrategyDrawerOpen(false)} aria-label="关闭帝国管理">×</button>
+        </header>
+        <div className="strategy-tabs" role="tablist" aria-label="帝国管理分类">
+          <button className={strategyTab === "citizens" ? "active" : ""} role="tab" aria-selected={strategyTab === "citizens"} onClick={() => setStrategyTab("citizens")}><b>市</b><span>市民</span></button>
+          <button className={strategyTab === "civics" ? "active" : ""} role="tab" aria-selected={strategyTab === "civics"} onClick={() => setStrategyTab("civics")}><b>⚖</b><span>市政</span></button>
+          <button className={strategyTab === "diplomacy" ? "active" : ""} role="tab" aria-selected={strategyTab === "diplomacy"} onClick={() => setStrategyTab("diplomacy")}><b>◇</b><span>外交</span></button>
+          <button className={strategyTab === "happiness" ? "active" : ""} role="tab" aria-selected={strategyTab === "happiness"} onClick={() => setStrategyTab("happiness")}><b>☀</b><span>幸福</span></button>
+        </div>
+
+        {strategyTab === "citizens" && <section className="strategy-panel" role="tabpanel">
+          <div className="strategy-summary"><div><small>人口</small><strong>{game.population}</strong><em>{effectiveWorkedTiles.length} 个工作地块</em></div><div><small>食物</small><strong>+{cityYields.food}</strong><em>{game.food}/{cityGrowthTarget}</em></div><div><small>生产</small><strong>+{cityYields.production}</strong><em>每回合</em></div></div>
+          <h3>城市总产出</h3>
+          <div className="strategy-summary"><div><small>科 / 文</small><strong>{cityYields.science} / {cityYields.culture}</strong><em>由工作格结算</em></div><div><small>金币</small><strong>+{cityYields.gold}</strong><em>贸易另计</em></div><div><small>城市中心</small><strong>固定</strong><em>不占人口</em></div></div>
+          <h3>当前工作地块</h3>
+          <div className="citizen-list">
+            {effectiveWorkedTiles.map((tileId) => {
+              const pos = posForId(tileId);
+              const tileYield = tileYieldsForState(game, pos);
+              const improvement = improvementAt(game, tileId);
+              const resource = RESOURCE_TILES[tileId] ? RESOURCE_INFO[RESOURCE_TILES[tileId]] : null;
+              return <button className="citizen-card worked" aria-pressed="true" key={tileId} onClick={() => handleTileClick(pos)}><span className="citizen-icon">{resource?.icon ?? "市"}</span><div><h4>{improvement?.name ?? resource?.name ?? TERRAIN_INFO[terrainAt(pos)].label}</h4><p>第 {pos.row + 1} 行 · 第 {pos.col + 1} 列 · 地图点击其他格可替换</p></div><b className="citizen-yield">粮{tileYield.food} 锤{tileYield.production} 科{tileYield.science} 文{tileYield.culture} 金{tileYield.gold}</b></button>;
+            })}
+          </div>
+          <button className="action-card" onClick={autoAssignCitizens}><span className="action-icon">◎</span><div><h4>自动安排市民</h4><p>按粮食、生产、科技、文化和金币综合价值重新选择。</p></div><b>立即执行</b></button>
+        </section>}
+
+        {strategyTab === "civics" && <section className="strategy-panel" role="tabpanel">
+          <div className="strategy-summary"><div><small>文化积累</small><strong>{game.civicProgress}</strong><em>+{culturePerTurn}/回合</em></div><div><small>已完成市政</small><strong>{game.completedCivics.length}/{CIVICS.length}</strong><em>逐项解锁</em></div><div><small>政策槽</small><strong>1</strong><em>{game.activePolicy ? "已采用" : "空置"}</em></div></div>
+          <h3>市政树</h3>
+          <div className="civic-tree">
+            {CIVICS.map((civic) => {
+              const done = game.completedCivics.includes(civic.id);
+              const active = game.activeCivic === civic.id;
+              const percent = active ? Math.min(100, game.civicProgress / civic.cost * 100) : done ? 100 : 0;
+              return <button className={`civic-node ${done ? "done" : ""} ${active ? "active" : ""}`} key={civic.id} disabled={done || aiThinking} onClick={() => chooseCivic(civic.id)}><small>{civic.icon} {civic.cost} 文化</small><h4>{civic.name}</h4><p>{civic.effect}</p><i className="mini-progress"><span style={{ width: `${percent}%` }} /></i></button>;
+            })}
+          </div>
+          <h3>共和国政策槽</h3>
+          <div className="policy-grid">
+            {(Object.keys(POLICIES) as PolicyId[]).map((policyId) => {
+              const policy = POLICIES[policyId];
+              const unlocked = game.completedCivics.includes(policy.unlockedBy);
+              const active = game.activePolicy === policyId;
+              return <button className={`policy-card ${active ? "slotted" : ""}`} aria-pressed={active} key={policyId} disabled={!unlocked || aiThinking} onClick={() => slotPolicy(active ? null : policyId)}><small>{policy.icon} {policy.category}</small><h4>{policy.name}</h4><p>{policy.effect}</p><b>{unlocked ? active ? "点击卸下" : "点击采用" : `完成${CIVICS.find((civic) => civic.id === policy.unlockedBy)?.name}解锁`}</b></button>;
+            })}
+          </div>
+        </section>}
+
+        {strategyTab === "diplomacy" && <section className="strategy-panel" role="tabpanel">
+          <div className="diplomacy-hero"><span className="leader-medallion">B</span><div><small>佩德罗二世 · 巴西</small><h3>{relationshipLabel}</h3><p>首都里约热内卢 · 距离 {CAPITAL_DISTANCE} 格</p></div><b>影响力 {game.influence}</b></div>
+          <div className="relationship-meter"><header><span>双边关系</span><strong>{game.brazilRelationship}/100 · {relationshipLabel}</strong></header><i><span style={{ width: `${game.brazilRelationship}%` }} /></i><footer><span>敌对</span><span>中立</span><span>互助</span></footer></div>
+          <div className="strategy-summary"><div><small>我国影响力</small><strong>{game.influence}</strong><em>+{influencePerTurn}/回合</em></div><div><small>巴西地区影响</small><strong>{game.brazilInfluence}/100</strong><em>达到 100 将失败</em></div><div><small>贸易路线</small><strong>{game.tradeRouteTurns || "—"}</strong><em>{game.tradeRouteTurns > 0 ? "剩余回合" : "尚未建立"}</em></div></div>
+          <h3>外交行动</h3>
+          <div className="diplomatic-actions">
+            <button className={`action-card ${game.tradeRouteTurns > 0 ? "active" : ""}`} disabled={aiThinking || game.influence < 12 || game.brazilRelationship < 40 || game.tradeRouteTurns > 0 || game.sanctionTurns > 0} onClick={() => handleDiplomaticAction("trade")} data-testid="diplomacy-trade"><span className="action-icon">⇄</span><div><h4>建立贸易路线</h4><p>6 回合金币 +4、科技 +1；友好关系逐回合改善。</p></div><b className="action-cost">◇12</b></button>
+            <button className={`action-card ${game.researchCollaborationTurns > 0 ? "active" : ""}`} disabled={aiThinking || game.influence < 18 || game.brazilRelationship < 55 || game.researchCollaborationTurns > 0 || game.sanctionTurns > 0} onClick={() => handleDiplomaticAction("research")} data-testid="diplomacy-research"><span className="action-icon">◆</span><div><h4>联合研究</h4><p>需要友好关系；4 回合科技 +2，关系立即提升。</p></div><b className="action-cost">◇18</b></button>
+            <button className={`action-card ${game.sanctionTurns > 0 ? "active" : ""}`} disabled={aiThinking || game.influence < 15 || game.sanctionTurns > 0 || game.tradeRouteTurns > 0 || game.researchCollaborationTurns > 0} onClick={() => handleDiplomaticAction("sanction")} data-testid="diplomacy-sanction"><span className="action-icon">!</span><div><h4>外交制裁</h4><p>3 回合压低巴西影响力增长，但会显著恶化关系。</p></div><b className="action-cost">◇15</b></button>
+          </div>
+        </section>}
+
+        {strategyTab === "happiness" && <section className="strategy-panel" role="tabpanel">
+          <div className="happiness-hero"><div className="happiness-ring" style={{ "--happiness": `${Math.min(100, game.happiness / HAPPINESS_TARGET * 100)}%` } as CSSProperties}><div><strong>{game.happiness}</strong><small>/ {HAPPINESS_TARGET}</small></div></div><div><h3>{game.celebrationPending ? "人民期待一场庆典" : game.celebration ? CELEBRATIONS[game.celebration].name : "城市安居乐业"}</h3><p>建筑、外交与贸易提高每回合幸福度；人口压力会降低增长。幸福过低时城市总产出下降。</p><b>{game.celebration ? `奖励剩余 ${game.celebrationTurns} 回合` : `每回合 +${happinessPerTurn}`}</b></div></div>
+          <div className="strategy-summary"><div><small>建筑贡献</small><strong>+{game.completedBuildings.length}</strong><em>每座建筑 +1</em></div><div><small>外交与贸易</small><strong>+{(game.tradeRouteTurns > 0 ? 2 : 0) + (game.brazilRelationship >= 65 ? 1 : 0)}</strong><em>稳定关系有益</em></div><div><small>人口压力</small><strong>-{Math.max(0, game.population - 4)}</strong><em>5 人口后增加</em></div></div>
+          <h3>{game.celebrationPending ? "选择本次庆典" : "庆典奖励"}</h3>
+          <div className="celebration-grid">
+            {(Object.keys(CELEBRATIONS) as CelebrationId[]).map((celebrationId) => {
+              const celebration = CELEBRATIONS[celebrationId];
+              const active = game.celebration === celebrationId && game.celebrationTurns > 0;
+              return <button className={`celebration-card ${active ? "active" : ""}`} aria-pressed={active} key={celebrationId} disabled={!game.celebrationPending || aiThinking} onClick={() => chooseCelebration(celebrationId)}><span className="celebration-icon">{celebration.icon}</span><h4>{celebration.name}</h4><p>{celebration.effect}</p><b>{active ? `${game.celebrationTurns} 回合` : game.celebrationPending ? "选择" : "幸福度满后可选"}</b></button>;
+            })}
+          </div>
+        </section>}
       </aside>
 
       {game.result && (
