@@ -523,8 +523,8 @@ export default function Home() {
                       {tileYield.culture > 0 && <i className="culture">文<b>{tileYield.culture}</b></i>}
                     </span>
                   )}
-                  {reachable && <span className="move-overlay" aria-hidden="true"><i /><b>{moveCost}</b></span>}
-                  {selected && <span className="selection-overlay" aria-hidden="true"><i /></span>}
+                  {reachable && <span className="move-overlay" aria-hidden="true"><svg className="hex-ring" viewBox="0 0 100 100" preserveAspectRatio="none"><polygon points="25,2 75,2 98,50 75,98 25,98 2,50" /></svg><i /><b>{moveCost}</b></span>}
+                  {selected && <span className="selection-overlay" aria-hidden="true"><svg className="hex-ring" viewBox="0 0 100 100" preserveAspectRatio="none"><polygon points="25,2 75,2 98,50 75,98 25,98 2,50" /></svg></span>}
                 </button>
               );
             })}

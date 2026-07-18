@@ -298,12 +298,13 @@ button { font: inherit; }
 .hex-tile.owned { box-shadow: inset 0 0 0 4px var(--cobalt); }
 .hex-tile.rival { box-shadow: inset 0 0 0 4px var(--terracotta); }
 
-.move-overlay { display: grid !important; place-items: center; position: absolute !important; inset: 5px; z-index: 5; clip-path: polygon(25% 0,75% 0,100% 50%,75% 100%,25% 100%,0 50%); color: white; background: transparent; pointer-events: none; text-shadow: none !important; filter: drop-shadow(0 0 3px rgba(32,75,54,.38)); }
-.move-overlay::before { content: ""; position: absolute; inset: 0; padding: 3px; clip-path: inherit; background: rgba(55,119,78,.88); -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0); -webkit-mask-composite: xor; mask-composite: exclude; }
+.move-overlay { display: grid !important; place-items: center; position: absolute !important; inset: 5px; z-index: 5; color: #37774e; background: transparent; pointer-events: none; text-shadow: none !important; filter: drop-shadow(0 0 3px rgba(32,75,54,.38)); }
+.hex-ring { width: 100%; height: 100%; position: absolute; inset: 0; overflow: visible; pointer-events: none; }
+.hex-ring polygon { fill: none; stroke: currentColor; stroke-width: 3px; stroke-linejoin: round; vector-effect: non-scaling-stroke; }
 .move-overlay i { width: 10px; height: 10px; position: relative; z-index: 2; border: 2px solid rgba(36,76,58,.64); border-radius: 50%; background: rgba(255,255,255,.96); box-shadow: 0 2px 5px rgba(34,42,39,.28); }
 .move-overlay b { width: 16px; height: 16px; display: grid; place-items: center; position: absolute; right: 9px; top: 6px; z-index: 2; border: 2px solid white; border-radius: 50%; color: white; background: var(--forest); box-shadow: 0 2px 4px rgba(34,42,39,.24); font-size: 8px; }
-.selection-overlay { position: absolute !important; inset: 2px; z-index: 6; padding: 4px; clip-path: polygon(25% 0,75% 0,100% 50%,75% 100%,25% 100%,0 50%); background: #f0c45c; pointer-events: none; -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0); -webkit-mask-composite: xor; mask-composite: exclude; filter: drop-shadow(0 0 3px rgba(240,196,92,.75)); }
-.selection-overlay i { display: none; }
+.selection-overlay { position: absolute !important; inset: 2px; z-index: 6; color: #f0c45c; background: transparent; pointer-events: none; filter: drop-shadow(0 0 3px rgba(240,196,92,.75)); }
+.selection-overlay .hex-ring polygon { stroke-width: 4px; }
 
 .yield-controls { display: flex; align-items: center; gap: 7px; position: absolute; right: 14px; top: 14px; z-index: 18; padding: 6px; border: 1px solid rgba(91,92,76,.15); border-radius: 11px; background: rgba(255,253,248,.9); box-shadow: 0 5px 16px rgba(34,42,39,.12); backdrop-filter: blur(8px); }
 .yield-legend { display: flex; gap: 3px; }
