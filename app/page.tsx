@@ -10,9 +10,9 @@ type CivicId = "craftsmanship" | "foreignTrade" | "publicService" | "popularSove
 type PolicyId = "urbanPlanning" | "caravansaries" | "publicWorks" | "charismaticLeader";
 type CelebrationId = "harvestFestival" | "industryFair" | "maySquare";
 type BuildingId = "monument" | "granary" | "academy" | "workshop";
-type UnitProductionId = "scout" | "gaucho";
+type UnitProductionId = "scout" | "gaucho" | "settler";
 type ProductionId = BuildingId | UnitProductionId;
-type UnitType = "scout" | "gaucho";
+type UnitType = "scout" | "gaucho" | "settler";
 type YieldKey = "food" | "production" | "science" | "culture";
 type ImprovementType = "palace" | "ranch" | "farm" | "mine" | "lumbermill" | "plantation";
 type BuildableImprovementType = Exclude<ImprovementType, "palace">;
@@ -22,11 +22,30 @@ type NarrativeEventId = "worldCouncil" | "pampasVoices" | "distantHorizon" | "co
 type LegacyCategory = "science" | "culture" | "economy" | "exploration";
 type RivalTurnPlan = { rivalId: RivalId; action: string; expandedTile: string | null; developedTile: string | null; grew: boolean };
 type RivalEmpireSnapshot = { population: number; development: number; ownedTiles: string[]; developedTiles: string[] };
-type PlayerUnit = { id: string; type: UnitType; pos: Position; moves: number };
+type CityId = string;
+type WarStatus = "peace" | "war";
+type ResultReason = "legacy" | "influence" | "conquest" | null;
+type PlayerUnit = { id: string; type: UnitType; pos: Position; moves: number; hp: number };
+type RivalUnit = { id: string; rivalId: RivalId; type: "warrior"; pos: Position; moves: number; hp: number };
 type TileYields = { food: number; production: number; science: number; culture: number; gold: number };
 type BuildingProject = { id: BuildingId; kind: "building"; name: string; cost: number; icon: string; effect: string; category: string; yield: YieldKey; allowedTerrains: Terrain[]; placementRule: string };
 type UnitProject = { id: UnitProductionId; kind: "unit"; unitType: UnitType; name: string; cost: number; icon: string; effect: string; category: string; yield: "production" };
 type ProductionProject = BuildingProject | UnitProject;
+type PlayerCity = {
+  id: CityId;
+  name: string;
+  pos: Position;
+  isCapital: boolean;
+  population: number;
+  food: number;
+  growthPending: number;
+  ruralTiles: string[];
+  activeProduction: ProductionId | null;
+  productionProgress: Record<ProductionId, number>;
+  completedBuildings: BuildingId[];
+  buildingPlacements: Partial<Record<BuildingId, string>>;
+  hp: number;
+};
 
 type GameState = {
   turn: number;
@@ -34,12 +53,10 @@ type GameState = {
   science: number;
   culture: number;
   greatPoints: number;
-  population: number;
-  food: number;
+  cities: PlayerCity[];
+  nextCitySerial: number;
   ownedTiles: string[];
-  ruralTiles: string[];
   builtImprovements: Partial<Record<string, BuildableImprovementType>>;
-  growthPending: number;
   activeTech: TechId | null;
   techProgress: number;
   completedTechs: TechId[];
@@ -47,10 +64,6 @@ type GameState = {
   civicProgress: number;
   completedCivics: CivicId[];
   activePolicy: PolicyId | null;
-  activeProduction: ProductionId | null;
-  productionProgress: Record<ProductionId, number>;
-  completedBuildings: BuildingId[];
-  buildingPlacements: Partial<Record<BuildingId, string>>;
   units: PlayerUnit[];
   selectedUnitId: string | null;
   nextUnitSerial: number;
@@ -66,6 +79,12 @@ type GameState = {
   tradeRouteTurns: number;
   researchCollaborationTurns: number;
   sanctionTurns: number;
+  wars: Record<RivalId, WarStatus>;
+  rivalUnits: RivalUnit[];
+  rivalMilitaryProgress: Record<RivalId, number>;
+  rivalCityHp: Record<RivalId, number>;
+  defeatedRivals: RivalId[];
+  nextRivalUnitSerial: number;
   happiness: number;
   celebration: CelebrationId | null;
   celebrationTurns: number;
@@ -83,10 +102,11 @@ type GameState = {
   message: string;
   log: string[];
   result: "win" | "lose" | null;
+  resultReason: ResultReason;
 };
 
 type SavedGameState = Omit<GameState, "discovered"> & { discovered: string[] };
-type SaveEnvelope = { version: 5; savedAt: string; game: SavedGameState };
+type SaveEnvelope = { version: 6; savedAt: string; game: SavedGameState };
 type SaveReadResult =
   | { ok: true; savedAt: string; game: GameState }
   | { ok: false; reason: "missing" | "version" | "corrupt" };
@@ -104,9 +124,12 @@ const BRAZIL_SCOUT_START = { col: 15, row: 5 };
 const BOARD_WIDTH = (COLS - 1) * 70 + 92;
 const BOARD_HEIGHT = (ROWS - 1) * 82 + 41 + 80;
 const HAPPINESS_TARGET = 60;
+const UNIT_MAX_HP = 100;
+const CITY_MAX_HP = 200;
+const RIVAL_UNIT_COST = 24;
 const AI_STEP_MS = 650;
 const SAVE_KEY = "civilization-dawn.single-slot";
-const SAVE_VERSION = 5 as const;
+const SAVE_VERSION = 6 as const;
 
 type RivalDefinition = {
   id: RivalId;
@@ -136,6 +159,9 @@ const RIVALS: RivalDefinition[] = [
 const RIVAL_BY_ID = Object.fromEntries(RIVALS.map((rival) => [rival.id, rival])) as Record<RivalId, RivalDefinition>;
 const DEFAULT_RIVAL_RELATIONSHIPS: Record<RivalId, number> = { brazil: 50, inca: 56, maya: 48, egypt: 45, han: 52 };
 const DEFAULT_RIVAL_INFLUENCE: Record<RivalId, number> = { brazil: 18, inca: 12, maya: 14, egypt: 11, han: 13 };
+const DEFAULT_WARS: Record<RivalId, WarStatus> = { brazil: "peace", inca: "peace", maya: "peace", egypt: "peace", han: "peace" };
+const DEFAULT_RIVAL_MILITARY_PROGRESS: Record<RivalId, number> = { brazil: 0, inca: 0, maya: 0, egypt: 0, han: 0 };
+const DEFAULT_RIVAL_CITY_HP: Record<RivalId, number> = { brazil: CITY_MAX_HP, inca: CITY_MAX_HP, maya: CITY_MAX_HP, egypt: CITY_MAX_HP, han: CITY_MAX_HP };
 const DEFAULT_LEGACY_POINTS: Record<LegacyCategory, number> = { science: 0, culture: 0, economy: 0, exploration: 0 };
 const LEGACY_MILESTONE_META: ReadonlyArray<{ id: string; category: LegacyCategory }> = [
   { id: "science-1", category: "science" }, { id: "science-2", category: "science" },
@@ -242,12 +268,35 @@ const PRODUCTIONS: ProductionProject[] = [
   { id: "workshop", kind: "building", name: "布宜诺斯工坊", cost: 32, icon: "⚒", effect: "首都每回合生产力 +2", category: "工业建筑", yield: "production", allowedTerrains: ["forest", "hills", "desert"], placementRule: "建在森林、丘陵或沙漠" },
   { id: "scout", kind: "unit", unitType: "scout", name: "潘帕斯侦察兵", cost: 12, icon: "侦", effect: "移动力 2 · 擅长揭开战争迷雾", category: "侦察单位", yield: "production" },
   { id: "gaucho", kind: "unit", unitType: "gaucho", name: "高乔骑手", cost: 20, icon: "高", effect: "移动力 3 · 阿根廷特色骑乘单位", category: "骑乘单位", yield: "production" },
+  { id: "settler", kind: "unit", unitType: "settler", name: "开拓者", cost: 30, icon: "拓", effect: "移动力 2 · 在合法陆地建立一座分城", category: "平民单位", yield: "production" },
 ];
 
-const UNIT_INFO: Record<UnitType, { name: string; short: string; baseMoves: number }> = {
-  scout: { name: "潘帕斯侦察兵", short: "侦", baseMoves: 2 },
-  gaucho: { name: "高乔骑手", short: "高", baseMoves: 3 },
+const UNIT_INFO: Record<UnitType, { name: string; short: string; baseMoves: number; strength: number; role: "combat" | "civilian" }> = {
+  scout: { name: "潘帕斯侦察兵", short: "侦", baseMoves: 2, strength: 16, role: "combat" },
+  gaucho: { name: "高乔骑手", short: "高", baseMoves: 3, strength: 32, role: "combat" },
+  settler: { name: "开拓者", short: "拓", baseMoves: 2, strength: 0, role: "civilian" },
 };
+
+const makeProductionProgress = () => Object.fromEntries(PRODUCTIONS.map((production) => [production.id, 0])) as Record<ProductionId, number>;
+const CITY_NAME_POOL = ["科尔多瓦", "罗萨里奥", "门多萨", "拉普拉塔", "萨尔塔", "圣菲"];
+
+function createPlayerCity(id: CityId, name: string, pos: Position, isCapital = false): PlayerCity {
+  return {
+    id,
+    name,
+    pos,
+    isCapital,
+    population: 1,
+    food: isCapital ? 8 : 0,
+    growthPending: 0,
+    ruralTiles: [],
+    activeProduction: null,
+    productionProgress: makeProductionProgress(),
+    completedBuildings: [],
+    buildingPlacements: {},
+    hp: CITY_MAX_HP,
+  };
+}
 
 const YIELD_META: Record<YieldKey, { label: string; symbol: string }> = {
   food: { label: "食物", symbol: "粮" },
@@ -258,6 +307,7 @@ const YIELD_META: Record<YieldKey, { label: string; symbol: string }> = {
 
 const idFor = ({ col, row }: Position) => `${col}-${row}`;
 const posForId = (id: string): Position => ({ col: Number(id.split("-")[0]), row: Number(id.split("-")[1]) });
+const addLog = (log: string[], entry: string) => [entry, ...log].slice(0, 4);
 const inBounds = ({ col, row }: Position) => col >= 0 && col < COLS && row >= 0 && row < ROWS;
 const EXPANSION_PATTERN: Terrain[] = ["grass", "forest", "hills", "grass", "desert", "forest", "grass", "hills", "water", "grass", "mountain", "forest"];
 const v3TerrainAt = ({ col, row }: Position): Terrain => {
@@ -322,9 +372,41 @@ function territoryFromDeveloped(developedTileIds: Iterable<string>) {
   return MAP_TILES.map((tile) => idFor(tile)).filter((tileId) => territory.has(tileId));
 }
 
-function playerDevelopedTileIds(state: Pick<GameState, "ruralTiles" | "buildingPlacements">) {
-  const buildingTiles = Object.values(state.buildingPlacements).filter((tileId): tileId is string => Boolean(tileId));
-  return Array.from(new Set([idFor(CITY_POS), ...state.ruralTiles, ...buildingTiles]));
+function cityDevelopedTileIds(city: PlayerCity) {
+  const buildingTiles = Object.values(city.buildingPlacements).filter((tileId): tileId is string => Boolean(tileId));
+  return Array.from(new Set([idFor(city.pos), ...city.ruralTiles, ...buildingTiles]));
+}
+
+function playerDevelopedTileIds(state: Pick<GameState, "cities">) {
+  return Array.from(new Set(state.cities.flatMap(cityDevelopedTileIds)));
+}
+
+function playerOwnedTilesForCities(cities: PlayerCity[]) {
+  return territoryFromDeveloped(cities.flatMap(cityDevelopedTileIds));
+}
+
+function capitalCity(state: Pick<GameState, "cities">) {
+  return state.cities.find((city) => city.isCapital) ?? state.cities[0];
+}
+
+function playerCityAt(state: Pick<GameState, "cities">, pos: Position) {
+  return state.cities.find((city) => idFor(city.pos) === idFor(pos)) ?? null;
+}
+
+function cityById(state: Pick<GameState, "cities">, cityId: CityId) {
+  return state.cities.find((city) => city.id === cityId) ?? null;
+}
+
+function allRuralTiles(state: Pick<GameState, "cities">) {
+  return state.cities.flatMap((city) => city.ruralTiles);
+}
+
+function totalPopulation(state: Pick<GameState, "cities">) {
+  return state.cities.reduce((sum, city) => sum + city.population, 0);
+}
+
+function allCompletedBuildings(state: Pick<GameState, "cities">) {
+  return state.cities.flatMap((city) => city.completedBuildings);
 }
 
 function isArgentineTerritory(state: Pick<GameState, "ownedTiles">, pos: Position) {
@@ -363,7 +445,7 @@ function deriveRivalEmpires(state: Pick<GameState, "turn" | "ownedTiles">): Reco
   const models = Object.fromEntries(RIVALS.map((rival) => [rival.id, {
     developedTiles: [],
     ownedTiles: initialRivalOwnedTilesFor(rival),
-  }])) as Record<RivalId, RivalModel>;
+  }])) as unknown as Record<RivalId, RivalModel>;
   const globallyClaimed = new Set(state.ownedTiles);
   RIVALS.forEach((rival) => models[rival.id].ownedTiles.forEach((tileId) => globallyClaimed.add(tileId)));
 
@@ -529,10 +611,9 @@ function initialDiscovered() {
 
 const INITIAL_RURAL_TILES: string[] = [];
 const INITIAL_OWNED_TILES = territoryFromDeveloped([idFor(CITY_POS)]);
-const CITY_MAX_BUILDABLE_IDS = new Set(MAP_TILES.map((tile) => idFor(tile)).filter((tileId) => hexDistance(posForId(tileId), CITY_POS) <= 3));
 
 function improvementTypeAt(state: GameState, tileId: string) {
-  const initialImprovement = tileId === idFor(CITY_POS) || state.ruralTiles.includes(tileId) ? INITIAL_IMPROVEMENTS[tileId] : null;
+  const initialImprovement = tileId === idFor(capitalCity(state).pos) ? "palace" : null;
   return state.builtImprovements[tileId] ?? initialImprovement ?? null;
 }
 
@@ -562,33 +643,42 @@ function automaticImprovementFor(pos: Position): BuildableImprovementType | null
   return null;
 }
 
-function growthTileError(state: GameState, pos: Position, knownForeignTerritory?: RivalDefinition | null) {
+function growthTileError(state: GameState, cityId: CityId, pos: Position, knownForeignTerritory?: RivalDefinition | null) {
+  const city = cityById(state, cityId);
+  if (!city) return "城市不存在";
   const tileId = idFor(pos);
   const owned = isArgentineTerritory(state, pos);
   if (!state.discovered.has(tileId)) return "尚未探索这块地";
-  if (tileId === idFor(CITY_POS)) return "城市中心不需要开发";
-  if (!CITY_MAX_BUILDABLE_IDS.has(tileId)) return "超出首都三格发展范围";
+  if (state.cities.some((candidate) => tileId === idFor(candidate.pos))) return "城市中心不需要开发";
+  if (hexDistance(pos, city.pos) > 3) return `超出${city.name}三格发展范围`;
   const foreignTerritory = knownForeignTerritory === undefined ? rivalTerritoryAt(state, pos) : knownForeignTerritory;
   if (foreignTerritory) return `${foreignTerritory.name}领土不能纳入城市边界`;
-  if (state.ruralTiles.includes(tileId)) return "这块地已经开发";
+  if (allRuralTiles(state).includes(tileId)) return "这块地已经开发";
   if (placedProductionAt(state, tileId)) return "城市建筑已占用这块地";
   if (!automaticImprovementFor(pos)) return `${TERRAIN_INFO[terrainAt(pos)].label}暂时无法形成农村改良`;
   if (!owned) return "只能开发当前城市边界内的地块";
-  const developed = new Set(playerDevelopedTileIds(state));
+  const developed = new Set(cityDevelopedTileIds(city));
   if (!neighbors(pos).some((neighbor) => developed.has(idFor(neighbor)))) return "只能开发紧邻现有开发区的地块";
   return null;
 }
 
+function placedBuildingAt(state: GameState, tileId: string) {
+  for (const city of state.cities) {
+    const entry = Object.entries(city.buildingPlacements).find(([, placedTile]) => placedTile === tileId);
+    if (entry) return { cityId: city.id, buildingId: entry[0] as BuildingId, completed: city.completedBuildings.includes(entry[0] as BuildingId) };
+  }
+  return null;
+}
+
 function placedProductionAt(state: GameState, tileId: string) {
-  const entry = Object.entries(state.buildingPlacements).find(([, placedTile]) => placedTile === tileId);
-  return (entry?.[0] as BuildingId | undefined) ?? null;
+  return placedBuildingAt(state, tileId)?.buildingId ?? null;
 }
 
 function placementAdjacencyFor(state: GameState, productionId: BuildingId, pos: Position) {
   const adjacent = neighbors(pos);
   const count = adjacent.filter((neighbor) => {
     const terrain = terrainAt(neighbor);
-    if (productionId === "monument") return idFor(neighbor) === idFor(CITY_POS) || terrain === "grass";
+    if (productionId === "monument") return state.cities.some((city) => idFor(neighbor) === idFor(city.pos)) || terrain === "grass";
     if (productionId === "granary") return terrain === "grass" || improvementTypeAt(state, idFor(neighbor)) === "farm";
     if (productionId === "academy") return terrain === "mountain" || terrain === "hills";
     return terrain === "hills" || terrain === "forest";
@@ -596,14 +686,16 @@ function placementAdjacencyFor(state: GameState, productionId: BuildingId, pos: 
   return Math.min(3, count);
 }
 
-function productionPlacementError(state: GameState, productionId: BuildingId, pos: Position, rivalPatrolTileIds?: ReadonlySet<string>) {
+function productionPlacementError(state: GameState, cityId: CityId, productionId: BuildingId, pos: Position, rivalPatrolTileIds?: ReadonlySet<string>) {
+  const city = cityById(state, cityId);
+  if (!city) return "城市不存在";
   const tileId = idFor(pos);
   const production = PRODUCTIONS.find((item): item is BuildingProject => item.id === productionId && item.kind === "building")!;
   const terrain = terrainAt(pos);
   if (!state.discovered.has(tileId)) return "尚未探索这块地";
-  if (!isArgentineTerritory(state, pos)) return "不在布宜诺斯艾利斯领土内";
-  if (!CITY_MAX_BUILDABLE_IDS.has(tileId)) return "超出首都三格建设范围";
-  if (tileId === idFor(CITY_POS)) return "首都宫殿已占用这块地";
+  if (!isArgentineTerritory(state, pos)) return `不在${city.name}可用领土内`;
+  if (hexDistance(pos, city.pos) > 3) return `超出${city.name}三格建设范围`;
+  if (state.cities.some((candidate) => tileId === idFor(candidate.pos))) return "城市中心已占用这块地";
   if (terrain === "water" || terrain === "mountain") return `${TERRAIN_INFO[terrain].label}不能建设`;
   const improvement = improvementAt(state, tileId);
   if (improvement) return `${improvement.name}已占用这块地`;
@@ -614,10 +706,10 @@ function productionPlacementError(state: GameState, productionId: BuildingId, po
   return null;
 }
 
-function bestAvailableAdjacency(state: GameState, productionId: BuildingId) {
+function bestAvailableAdjacency(state: GameState, cityId: CityId, productionId: BuildingId) {
   return MAP_TILES.reduce((best, tile) => {
     const pos = { col: tile.col, row: tile.row };
-    return productionPlacementError(state, productionId, pos) ? best : Math.max(best, placementAdjacencyFor(state, productionId, pos));
+    return productionPlacementError(state, cityId, productionId, pos) ? best : Math.max(best, placementAdjacencyFor(state, productionId, pos));
   }, 0);
 }
 
@@ -636,10 +728,10 @@ function tileYieldsForState(state: GameState, pos: Position): TileYields {
   const tileId = idFor(pos);
   const terrain = terrainAt(pos);
   const base = TERRAIN_INFO[terrain];
-  const placedProductionId = placedProductionAt(state, tileId);
-  if (placedProductionId) {
-    if (!state.completedBuildings.includes(placedProductionId)) return { ...EMPTY_YIELDS };
-    const project = PRODUCTIONS.find((item): item is BuildingProject => item.kind === "building" && item.id === placedProductionId)!;
+  const placedBuilding = placedBuildingAt(state, tileId);
+  if (placedBuilding) {
+    if (!placedBuilding.completed) return { ...EMPTY_YIELDS };
+    const project = PRODUCTIONS.find((item): item is BuildingProject => item.kind === "building" && item.id === placedBuilding.buildingId)!;
     const value = 2 + placementAdjacencyFor(state, project.id, pos);
     return { ...EMPTY_YIELDS, [project.yield]: value };
   }
@@ -659,21 +751,23 @@ function tileYieldsForState(state: GameState, pos: Position): TileYields {
   return total;
 }
 
-function cityYieldTotals(state: GameState): TileYields {
+function cityYieldTotalsFor(state: GameState, cityId: CityId): TileYields {
+  const city = cityById(state, cityId);
   const total = { ...EMPTY_YIELDS };
-  const developed = new Set([idFor(CITY_POS), ...state.ruralTiles]);
+  if (!city) return total;
+  const developed = new Set([idFor(city.pos), ...city.ruralTiles]);
   developed.forEach((tileId) => addYields(total, tileYieldsForState(state, posForId(tileId))));
-  state.completedBuildings.forEach((buildingId) => {
-    const tileId = state.buildingPlacements[buildingId];
+  city.completedBuildings.forEach((buildingId) => {
+    const tileId = city.buildingPlacements[buildingId];
     if (tileId && !developed.has(tileId)) addYields(total, tileYieldsForState(state, posForId(tileId)));
   });
-  if (state.activePolicy === "urbanPlanning") total.production += 1;
-  if (state.activePolicy === "publicWorks") total.food += 2;
-  if (state.activePolicy === "caravansaries" && state.tradeRouteTurns > 0) total.gold += 2;
-  if (state.completedTechs.includes("federalism")) total.science += 2;
-  if (state.messiRecruited) total.culture += 2;
-  if (state.tradePartner && state.tradeRouteTurns > 0) addYields(total, RESOURCE_INFO[RIVAL_BY_ID[state.tradePartner].resource].yield);
-  if (state.celebration && state.celebrationTurns > 0) total[CELEBRATIONS[state.celebration].yield] += 3;
+  if (city.isCapital && state.activePolicy === "urbanPlanning") total.production += 1;
+  if (city.isCapital && state.activePolicy === "publicWorks") total.food += 2;
+  if (city.isCapital && state.activePolicy === "caravansaries" && state.tradeRouteTurns > 0) total.gold += 2;
+  if (city.isCapital && state.completedTechs.includes("federalism")) total.science += 2;
+  if (city.isCapital && state.messiRecruited) total.culture += 2;
+  if (city.isCapital && state.tradePartner && state.tradeRouteTurns > 0) addYields(total, RESOURCE_INFO[RIVAL_BY_ID[state.tradePartner].resource].yield);
+  if (city.isCapital && state.celebration && state.celebrationTurns > 0) total[CELEBRATIONS[state.celebration].yield] += 3;
   if (state.happiness <= 10) {
     total.food = Math.max(1, Math.floor(total.food * .8));
     total.production = Math.max(1, Math.floor(total.production * .8));
@@ -682,6 +776,10 @@ function cityYieldTotals(state: GameState): TileYields {
     total.gold = Math.max(0, Math.floor(total.gold * .8));
   }
   return total;
+}
+
+function cityYieldTotals(state: GameState): TileYields {
+  return state.cities.reduce((total, city) => addYields(total, cityYieldTotalsFor(state, city.id)), { ...EMPTY_YIELDS });
 }
 
 function rivalYieldsFor(state: Pick<GameState, "turn" | "ownedTiles" | "rivalInfluence">, rivalId: RivalId, empire = deriveRivalEmpires(state)[rivalId]) {
@@ -703,7 +801,7 @@ function relationshipLabelFor(value: number) {
 
 function agendaRelationDelta(state: GameState, rivalId: RivalId) {
   if (rivalId === "brazil") return state.culture >= state.science ? 1 : 0;
-  if (rivalId === "inca") return state.ruralTiles.filter((tileId) => terrainAt(posForId(tileId)) === "hills").length >= 2 ? 1 : 0;
+  if (rivalId === "inca") return allRuralTiles(state).filter((tileId) => terrainAt(posForId(tileId)) === "hills").length >= 2 ? 1 : 0;
   if (rivalId === "maya") return state.completedTechs.length >= 2 ? 1 : 0;
   if (rivalId === "egypt") return state.tradePartner === "egypt" && state.tradeRouteTurns > 0 ? 1 : 0;
   return state.completedCivics.length >= 2 || state.happiness >= 40 ? 1 : 0;
@@ -712,7 +810,7 @@ function agendaRelationDelta(state: GameState, rivalId: RivalId) {
 type LegacyMilestone = { id: string; category: LegacyCategory; name: string; progress: number; target: number; reward: string; icon: string };
 
 function legacyMilestonesFor(state: GameState): LegacyMilestone[] {
-  const developedResources = new Set(state.ruralTiles.map((tileId) => RESOURCE_TILES[tileId]).filter(Boolean)).size;
+  const developedResources = new Set(allRuralTiles(state).map((tileId) => RESOURCE_TILES[tileId]).filter(Boolean)).size;
   return [
     { id: "science-1", category: "science", name: "知识萌芽", progress: state.completedTechs.length, target: 1, reward: "+10 科技", icon: "◆" },
     { id: "science-2", category: "science", name: "理性时代", progress: state.completedTechs.length, target: 3, reward: "+1 遗产点", icon: "◆" },
@@ -725,8 +823,8 @@ function legacyMilestonesFor(state: GameState): LegacyMilestone[] {
   ];
 }
 
-function hasWonDawn(state: Pick<GameState, "population" | "messiRecruited" | "legacyPoints">) {
-  return state.population >= 6
+function hasWonDawn(state: Pick<GameState, "cities" | "messiRecruited" | "legacyPoints">) {
+  return totalPopulation(state) >= 6
     && state.messiRecruited
     && (Object.keys(DEFAULT_LEGACY_POINTS) as LegacyCategory[]).every((category) => state.legacyPoints[category] >= 2);
 }
@@ -737,7 +835,7 @@ const NARRATIVE_EVENTS: Record<NarrativeEventId, { kicker: string; title: string
     { id: "markets", label: "开放市场", detail: "让港口先于政客说话。", reward: "金币 +30" },
     { id: "scholars", label: "召开学会", detail: "以知识作为共同语言。", reward: "科技 +15；文化 +8" },
   ] },
-  pampasVoices: { kicker: "城市成长", title: "新城区需要一种性格", text: "人口增长带来了新的街区。市民要求政府明确：这片土地首先应该养活人、制造工具，还是讲述共同的故事？", trigger: (state) => state.population >= 4, choices: [
+  pampasVoices: { kicker: "城市成长", title: "新城区需要一种性格", text: "人口增长带来了新的街区。市民要求政府明确：这片土地首先应该养活人、制造工具，还是讲述共同的故事？", trigger: (state) => totalPopulation(state) >= 4, choices: [
     { id: "fields", label: "优先粮食", detail: "扶持近郊农庄。", reward: "粮食 +12；幸福度 +5" },
     { id: "shops", label: "优先工坊", detail: "奖励城市手工业。", reward: "当前生产 +10" },
     { id: "squares", label: "优先广场", detail: "为公共生活留出空间。", reward: "文化 +12；伟人点 +5" },
@@ -747,7 +845,7 @@ const NARRATIVE_EVENTS: Record<NarrativeEventId, { kicker: string; title: string
     { id: "stories", label: "记录见闻", detail: "把远行故事带回广场。", reward: "文化 +12" },
     { id: "outposts", label: "设立补给站", detail: "为后续远征准备资金。", reward: "金币 +24" },
   ] },
-  coffeeExchange: { kicker: "资源故事", title: "咖啡走进世界市场", text: "新开发的咖啡园吸引了商人与学者。出口可以迅速获利，本地消费则可能孕育一种新的城市文化。", trigger: (state) => state.ruralTiles.some((tileId) => RESOURCE_TILES[tileId] === "coffee"), choices: [
+  coffeeExchange: { kicker: "资源故事", title: "咖啡走进世界市场", text: "新开发的咖啡园吸引了商人与学者。出口可以迅速获利，本地消费则可能孕育一种新的城市文化。", trigger: (state) => allRuralTiles(state).some((tileId) => RESOURCE_TILES[tileId] === "coffee"), choices: [
     { id: "export", label: "扩大出口", detail: "优先签订海外订单。", reward: "金币 +28；影响力 +6" },
     { id: "cafes", label: "扶持咖啡馆", detail: "让讨论与艺术在城市生根。", reward: "文化 +16；伟人点 +4" },
   ] },
@@ -758,7 +856,7 @@ const NARRATIVE_EVENTS: Record<NarrativeEventId, { kicker: string; title: string
   ] },
 };
 
-function happinessGainFor(state: GameState, population = state.population, completedBuildingCount = state.completedBuildings.length, relationship = Math.max(...Object.values(state.rivalRelationships))) {
+function happinessGainFor(state: GameState, population = totalPopulation(state), completedBuildingCount = allCompletedBuildings(state).length, relationship = Math.max(...Object.values(state.rivalRelationships))) {
   return Math.max(0, 3 + completedBuildingCount + (state.tradeRouteTurns > 0 ? 2 : 0) + (relationship >= 65 ? 1 : 0) - Math.max(0, population - 4));
 }
 
@@ -770,9 +868,9 @@ function maxMovesForUnit(type: UnitType, completedTechs: readonly TechId[], foot
   return UNIT_INFO[type].baseMoves + (type === "gaucho" && completedTechs.includes("riding") ? 1 : 0) + (footballTurns > 0 ? 1 : 0);
 }
 
-function findUnitDeployment(state: GameState) {
-  const candidates = [CITY_POS, ...neighbors(CITY_POS)];
-  const occupied = new Set(state.units.map((unit) => idFor(unit.pos)));
+function findUnitDeployment(state: GameState, cityPos: Position) {
+  const candidates = [cityPos, ...neighbors(cityPos)];
+  const occupied = new Set([...state.units, ...state.rivalUnits].map((unit) => idFor(unit.pos)));
   return candidates.find((pos, index) => {
     const terrain = terrainAt(pos);
     return candidates.findIndex((candidate) => idFor(candidate) === idFor(pos)) === index
@@ -780,23 +878,418 @@ function findUnitDeployment(state: GameState) {
       && terrain !== "water"
       && terrain !== "mountain"
       && !occupied.has(idFor(pos))
-      && !rivalPatrolsFor(state).some((patrol) => idFor(pos) === idFor(patrol.pos));
+      && !state.cities.some((city) => idFor(city.pos) === idFor(pos));
   }) ?? null;
 }
 
+function initialRivalUnits(): RivalUnit[] {
+  return RIVALS.map((rival, index) => {
+    const pos = neighbors(rival.capital).find((candidate) => {
+      const terrain = terrainAt(candidate);
+      return terrain !== "water" && terrain !== "mountain" && !RIVALS.some((other) => idFor(other.capital) === idFor(candidate));
+    }) ?? rival.capital;
+    return { id: `rival-warrior-${index + 1}`, rivalId: rival.id, type: "warrior", pos, moves: 2, hp: UNIT_MAX_HP };
+  });
+}
+
+function settlementError(state: GameState, pos: Position, settlerId?: string) {
+  const tileId = idFor(pos);
+  const terrain = terrainAt(pos);
+  if (!state.discovered.has(tileId)) return "尚未探索这块地";
+  if (terrain === "water" || terrain === "mountain") return `${TERRAIN_INFO[terrain].label}不能建立城市`;
+  if (state.cities.some((city) => hexDistance(city.pos, pos) < 4)) return "距离现有城市至少需要 4 格";
+  if (RIVALS.some((rival) => !state.defeatedRivals.includes(rival.id) && hexDistance(rival.capital, pos) < 4)) return "距离其他文明城市至少需要 4 格";
+  if (state.units.some((unit) => unit.id !== settlerId && idFor(unit.pos) === tileId) || state.rivalUnits.some((unit) => idFor(unit.pos) === tileId)) return "已有单位占据这块地";
+  const newTerritory = territoryFromDeveloped([tileId]);
+  const foreignTerritory = deriveRivalEmpires(state);
+  const overlappingRival = RIVALS.find((rival) => !state.defeatedRivals.includes(rival.id) && newTerritory.some((claimed) => foreignTerritory[rival.id].ownedTiles.includes(claimed)));
+  if (overlappingRival) return `新城边界会与${overlappingRival.name}重叠`;
+  return null;
+}
+
+function foundCity(state: GameState, settlerId: string): GameState {
+  const settler = state.units.find((unit) => unit.id === settlerId && unit.type === "settler");
+  if (!settler) return { ...state, message: "需要选中开拓者才能建立城市。" };
+  const error = settlementError(state, settler.pos, settlerId);
+  if (error) return { ...state, message: `无法建城：${error}。` };
+  const cityId = `city-${state.nextCitySerial}`;
+  const cityName = CITY_NAME_POOL[state.nextCitySerial - 2] ?? `阿根廷城 ${state.nextCitySerial}`;
+  const city = createPlayerCity(cityId, cityName, settler.pos);
+  const cities = [...state.cities, city];
+  const message = `${cityName}建立！开拓者已转化为城市，新的生产与成长循环已经开始。`;
+  return {
+    ...state,
+    cities,
+    nextCitySerial: state.nextCitySerial + 1,
+    ownedTiles: playerOwnedTilesForCities(cities),
+    units: state.units.filter((unit) => unit.id !== settlerId),
+    selectedUnitId: null,
+    selectedTile: idFor(city.pos),
+    discovered: reveal(state.discovered, city.pos, 2),
+    message,
+    log: addLog(state.log, message),
+  };
+}
+
+function combatDamage(attackerStrength: number, defenderStrength: number) {
+  return Math.max(10, Math.min(45, 24 + attackerStrength - defenderStrength));
+}
+
+function declareWar(state: GameState, rivalId: RivalId): GameState {
+  if (state.defeatedRivals.includes(rivalId) || state.wars[rivalId] === "war") return state;
+  const rival = RIVAL_BY_ID[rivalId];
+  const message = `阿根廷已向${rival.name}宣战。双方战斗单位现在可以交战，${rival.name}军队会在电脑回合主动进攻。`;
+  return {
+    ...state,
+    wars: { ...state.wars, [rivalId]: "war" },
+    rivalRelationships: { ...state.rivalRelationships, [rivalId]: Math.min(15, state.rivalRelationships[rivalId]) },
+    tradePartner: state.tradePartner === rivalId ? null : state.tradePartner,
+    tradeRouteTurns: state.tradePartner === rivalId ? 0 : state.tradeRouteTurns,
+    researchPartner: state.researchPartner === rivalId ? null : state.researchPartner,
+    researchCollaborationTurns: state.researchPartner === rivalId ? 0 : state.researchCollaborationTurns,
+    message,
+    log: addLog(state.log, message),
+  };
+}
+
+function resolvePlayerAttack(state: GameState, attackerId: string, target: Position): GameState {
+  const attacker = state.units.find((unit) => unit.id === attackerId);
+  if (!attacker || attacker.moves <= 0 || UNIT_INFO[attacker.type].role !== "combat" || hexDistance(attacker.pos, target) !== 1) return state;
+  const targetId = idFor(target);
+  const enemy = state.rivalUnits.find((unit) => idFor(unit.pos) === targetId);
+  const capital = RIVALS.find((rival) => !state.defeatedRivals.includes(rival.id) && idFor(rival.capital) === targetId);
+  const rivalId = enemy?.rivalId ?? capital?.id;
+  if (!rivalId) return state;
+  if (state.wars[rivalId] !== "war") {
+    const message = `与${RIVAL_BY_ID[rivalId].name}仍处于和平状态，请先在外交窗口宣战。`;
+    return { ...state, message, log: addLog(state.log, message) };
+  }
+  const attackStrength = UNIT_INFO[attacker.type].strength;
+  if (enemy) {
+    const dealt = combatDamage(attackStrength, 24);
+    const returned = combatDamage(24, attackStrength);
+    const enemyHp = enemy.hp - dealt;
+    const attackerHp = attacker.hp - (enemyHp > 0 ? returned : Math.floor(returned / 2));
+    let rivalUnits = state.rivalUnits.filter((unit) => unit.id !== enemy.id);
+    if (enemyHp > 0) rivalUnits = [...rivalUnits, { ...enemy, hp: enemyHp, moves: 0 }];
+    let units = state.units.filter((unit) => unit.id !== attacker.id);
+    if (attackerHp > 0) units = [...units, { ...attacker, hp: attackerHp, moves: 0, pos: enemyHp <= 0 ? target : attacker.pos }];
+    const message = enemyHp <= 0
+      ? `${UNIT_INFO[attacker.type].name}击溃${RIVAL_BY_ID[rivalId].name}战士并推进到目标格。`
+      : `${UNIT_INFO[attacker.type].name}发起攻击：敌军 -${dealt} HP，我军 -${returned} HP。`;
+    return { ...state, units, rivalUnits, selectedUnitId: attackerHp > 0 ? attacker.id : null, selectedTile: attackerHp > 0 ? idFor(enemyHp <= 0 ? target : attacker.pos) : targetId, message, log: addLog(state.log, message) };
+  }
+
+  const cityHp = Math.max(0, state.rivalCityHp[rivalId] - combatDamage(attackStrength, 28));
+  const returned = combatDamage(28, attackStrength);
+  const attackerHp = attacker.hp - (cityHp > 0 ? returned : Math.floor(returned / 2));
+  let units = state.units.filter((unit) => unit.id !== attacker.id);
+  if (attackerHp > 0) units = [...units, { ...attacker, hp: attackerHp, moves: 0, pos: cityHp <= 0 ? target : attacker.pos }];
+  const defeatedRivals = cityHp <= 0 ? [...state.defeatedRivals, rivalId] : state.defeatedRivals;
+  const rivalUnits = cityHp <= 0 ? state.rivalUnits.filter((unit) => unit.rivalId !== rivalId) : state.rivalUnits;
+  const conquestWin = defeatedRivals.length === RIVALS.length;
+  const message = cityHp <= 0
+    ? `${RIVAL_BY_ID[rivalId].capitalName}陷落，${RIVAL_BY_ID[rivalId].name}退出曙光时代。${conquestWin ? "阿根廷取得征服胜利！" : ""}`
+    : `我军攻打${RIVAL_BY_ID[rivalId].capitalName}，城防剩余 ${cityHp}/${CITY_MAX_HP}。`;
+  return {
+    ...state,
+    units,
+    rivalUnits,
+    rivalCityHp: { ...state.rivalCityHp, [rivalId]: cityHp },
+    defeatedRivals,
+    selectedUnitId: attackerHp > 0 ? attacker.id : null,
+    selectedTile: targetId,
+    result: conquestWin ? "win" : state.result,
+    resultReason: conquestWin ? "conquest" : state.resultReason,
+    message,
+    log: addLog(state.log, message),
+  };
+}
+
+function nextStepToward(start: Position, targets: Position[], blocked: ReadonlySet<string>) {
+  const targetIds = new Set(targets.map(idFor));
+  const queue: Position[] = [start];
+  const previous = new Map<string, string | null>([[idFor(start), null]]);
+  let reached: string | null = null;
+  for (let head = 0; head < queue.length && head < COLS * ROWS; head += 1) {
+    const current = queue[head];
+    const currentId = idFor(current);
+    if (currentId !== idFor(start) && targetIds.has(currentId)) { reached = currentId; break; }
+    for (const next of neighbors(current)) {
+      const nextId = idFor(next);
+      const terrain = terrainAt(next);
+      if (previous.has(nextId) || blocked.has(nextId) || terrain === "water" || terrain === "mountain") continue;
+      previous.set(nextId, currentId);
+      queue.push(next);
+    }
+  }
+  if (!reached) return null;
+  let step = reached;
+  while (previous.get(step) && previous.get(step) !== idFor(start)) step = previous.get(step)!;
+  return posForId(step);
+}
+
+function advanceRivalMilitaryPhase(state: GameState, rivalId: RivalId): GameState {
+  if (state.defeatedRivals.includes(rivalId)) return state;
+  const rival = RIVAL_BY_ID[rivalId];
+  const atWar = state.wars[rivalId] === "war";
+  let units = [...state.units];
+  let cities = state.cities.map((city) => ({ ...city }));
+  const builtImprovements = { ...state.builtImprovements };
+  const rivalUnits = state.rivalUnits.map((unit) => ({ ...unit, moves: unit.rivalId === rivalId ? 2 : unit.moves }));
+  const actions: string[] = [];
+
+  for (const original of rivalUnits.filter((unit) => unit.rivalId === rivalId)) {
+    const index = rivalUnits.findIndex((unit) => unit.id === original.id);
+    if (index < 0) continue;
+    const unit = rivalUnits[index];
+    if (!atWar) {
+      const empire = deriveRivalEmpires(state)[rivalId];
+      const patrol = neighbors(unit.pos).find((pos) => empire.ownedTiles.includes(idFor(pos)) && terrainAt(pos) !== "water" && terrainAt(pos) !== "mountain" && !rivalUnits.some((other) => other.id !== unit.id && idFor(other.pos) === idFor(pos)));
+      if (patrol) rivalUnits[index] = { ...unit, pos: patrol, moves: 0 };
+      continue;
+    }
+
+    const adjacentPlayer = units.find((target) => hexDistance(unit.pos, target.pos) === 1);
+    if (adjacentPlayer) {
+      const dealt = combatDamage(24, UNIT_INFO[adjacentPlayer.type].strength);
+      const returned = UNIT_INFO[adjacentPlayer.type].role === "combat" ? combatDamage(UNIT_INFO[adjacentPlayer.type].strength, 24) : 0;
+      const playerHp = adjacentPlayer.hp - dealt;
+      const enemyHp = unit.hp - (playerHp > 0 ? returned : Math.floor(returned / 2));
+      units = units.filter((target) => target.id !== adjacentPlayer.id);
+      if (playerHp > 0) units.push({ ...adjacentPlayer, hp: playerHp });
+      if (enemyHp <= 0) rivalUnits.splice(index, 1);
+      else rivalUnits[index] = { ...unit, hp: enemyHp, moves: 0, pos: playerHp <= 0 ? adjacentPlayer.pos : unit.pos };
+      actions.push(playerHp <= 0 ? `击败我方${UNIT_INFO[adjacentPlayer.type].name}` : `攻击我方${UNIT_INFO[adjacentPlayer.type].name}`);
+      continue;
+    }
+
+    const adjacentCity = cities.find((city) => hexDistance(unit.pos, city.pos) === 1);
+    if (adjacentCity) {
+      const dealt = combatDamage(24, 28);
+      const returned = combatDamage(28, 24);
+      const cityHp = adjacentCity.hp - dealt;
+      const enemyHp = unit.hp - (cityHp > 0 ? returned : Math.floor(returned / 2));
+      if (cityHp <= 0) {
+        adjacentCity.ruralTiles.forEach((tileId) => { delete builtImprovements[tileId]; });
+        cities = cities.filter((city) => city.id !== adjacentCity.id);
+        if (cities.length > 0 && !cities.some((city) => city.isCapital)) cities = cities.map((city, cityIndex) => cityIndex === 0 ? { ...city, isCapital: true } : city);
+      }
+      else cities = cities.map((city) => city.id === adjacentCity.id ? { ...city, hp: cityHp } : city);
+      if (enemyHp <= 0) rivalUnits.splice(index, 1);
+      else rivalUnits[index] = { ...unit, hp: enemyHp, moves: 0, pos: cityHp <= 0 ? adjacentCity.pos : unit.pos };
+      actions.push(cityHp <= 0 ? `攻陷${adjacentCity.name}` : `围攻${adjacentCity.name}（城防 ${Math.max(0, cityHp)}）`);
+      continue;
+    }
+
+    const targets = [...units.map((target) => target.pos), ...cities.map((city) => city.pos)];
+    const blocked = new Set(rivalUnits.filter((other) => other.id !== unit.id).map((other) => idFor(other.pos)));
+    const step = nextStepToward(unit.pos, targets, blocked);
+    if (step && !units.some((target) => idFor(target.pos) === idFor(step)) && !cities.some((city) => idFor(city.pos) === idFor(step))) {
+      rivalUnits[index] = { ...unit, pos: step, moves: 0 };
+      actions.push("向阿根廷目标推进");
+    }
+  }
+
+  const defeated = cities.length === 0;
+  const message = actions.length ? `${rival.name}军队：${actions.join("、")}。` : `${rival.name}完成本回合部署。`;
+  return {
+    ...state,
+    units,
+    cities,
+    ownedTiles: playerOwnedTilesForCities(cities),
+    builtImprovements,
+    rivalUnits,
+    selectedUnitId: units.some((unit) => unit.id === state.selectedUnitId) ? state.selectedUnitId : null,
+    result: defeated ? "lose" : state.result,
+    resultReason: defeated ? "conquest" : state.resultReason,
+    message,
+    log: addLog(state.log, message),
+  };
+}
+
+function advanceRivalProduction(state: GameState, rivalId: RivalId): GameState {
+  if (state.defeatedRivals.includes(rivalId)) return state;
+  const gain = rivalYieldsFor(state, rivalId).production;
+  let progress = state.rivalMilitaryProgress[rivalId] + gain;
+  const rivalUnits = [...state.rivalUnits];
+  let nextSerial = state.nextRivalUnitSerial;
+  if (progress >= RIVAL_UNIT_COST) {
+    const rival = RIVAL_BY_ID[rivalId];
+    const occupied = new Set([...state.units, ...rivalUnits].map((unit) => idFor(unit.pos)));
+    const deployment = [rival.capital, ...neighbors(rival.capital)].find((pos) => terrainAt(pos) !== "water" && terrainAt(pos) !== "mountain" && !occupied.has(idFor(pos)));
+    if (deployment) {
+      rivalUnits.push({ id: `rival-warrior-${nextSerial}`, rivalId, type: "warrior", pos: deployment, moves: 0, hp: UNIT_MAX_HP });
+      nextSerial += 1;
+      progress -= RIVAL_UNIT_COST;
+    }
+  }
+  return { ...state, rivalUnits, nextRivalUnitSerial: nextSerial, rivalMilitaryProgress: { ...state.rivalMilitaryProgress, [rivalId]: progress } };
+}
+
+function resolvePlayerEconomyRound(state: GameState): GameState {
+  const turnYields = cityYieldTotals(state);
+  const scienceGain = turnYields.science + (state.tradeRouteTurns > 0 ? 1 : 0) + (state.researchCollaborationTurns > 0 ? 2 : 0);
+  const cultureGain = turnYields.culture;
+  const goldGain = turnYields.gold + (state.tradeRouteTurns > 0 ? 4 : 0);
+  const events: string[] = [];
+  const cities = state.cities.map((city) => ({ ...city, productionProgress: { ...city.productionProgress }, completedBuildings: [...city.completedBuildings], buildingPlacements: { ...city.buildingPlacements } }));
+  let units = [...state.units];
+  let nextUnitSerial = state.nextUnitSerial;
+  let selectedUnitId = state.selectedUnitId;
+  let selectedTile = state.selectedTile;
+
+  for (let index = 0; index < cities.length; index += 1) {
+    let city = cities[index];
+    const yields = cityYieldTotalsFor({ ...state, cities }, city.id);
+    let food = city.food + yields.food;
+    let growthPending = city.growthPending;
+    const growthTarget = 10 + city.population * 4;
+    if (food >= growthTarget) {
+      food -= growthTarget;
+      growthPending += 1;
+      events.push(`${city.name}可以增长人口，请选择新的开发地块。`);
+    }
+    city = { ...city, food, growthPending, hp: Math.min(CITY_MAX_HP, city.hp + 8) };
+
+    if (city.activeProduction) {
+      const production = PRODUCTIONS.find((project) => project.id === city.activeProduction)!;
+      const progress = Math.min(production.cost, city.productionProgress[production.id] + Math.max(1, yields.production));
+      city.productionProgress[production.id] = progress;
+      if (progress >= production.cost) {
+        if (production.kind === "building") {
+          if (!city.completedBuildings.includes(production.id)) city.completedBuildings.push(production.id);
+          city.activeProduction = null;
+          events.push(`${city.name}完成${production.name}。`);
+        } else {
+          const deploymentState: GameState = { ...state, cities, units, rivalUnits: state.rivalUnits };
+          const deployment = findUnitDeployment(deploymentState, city.pos);
+          if (deployment) {
+            const unitId = `${production.unitType}-${nextUnitSerial}`;
+            units.push({ id: unitId, type: production.unitType, pos: deployment, moves: 0, hp: UNIT_MAX_HP });
+            nextUnitSerial += 1;
+            selectedUnitId = unitId;
+            selectedTile = idFor(deployment);
+            city.productionProgress[production.id] = 0;
+            city.activeProduction = null;
+            events.push(`${city.name}完成${production.name}，单位已在城市旁部署。`);
+          } else {
+            city.productionProgress[production.id] = production.cost - 1;
+            events.push(`${city.name}周边没有部署空格，${production.name}等待出城。`);
+          }
+        }
+      }
+    }
+    cities[index] = city;
+  }
+
+  let techProgress = state.techProgress + scienceGain;
+  let activeTech = state.activeTech;
+  const completedTechs = [...state.completedTechs];
+  if (activeTech) {
+    const tech = TECHS.find((item) => item.id === activeTech)!;
+    if (techProgress >= tech.cost) {
+      techProgress -= tech.cost;
+      if (!completedTechs.includes(activeTech)) completedTechs.push(activeTech);
+      events.push(`完成科技：${tech.name}。`);
+      activeTech = null;
+    }
+  }
+  let civicProgress = state.civicProgress + cultureGain;
+  let activeCivic = state.activeCivic;
+  const completedCivics = [...state.completedCivics];
+  if (activeCivic) {
+    const civic = CIVICS.find((item) => item.id === activeCivic)!;
+    if (civicProgress >= civic.cost) {
+      civicProgress -= civic.cost;
+      if (!completedCivics.includes(activeCivic)) completedCivics.push(activeCivic);
+      events.push(`完成市政：${civic.name}。`);
+      activeCivic = null;
+    }
+  }
+
+  const footballTurns = Math.max(0, state.footballTurns - 1);
+  const tradeRouteTurns = Math.max(0, state.tradeRouteTurns - 1);
+  const researchCollaborationTurns = Math.max(0, state.researchCollaborationTurns - 1);
+  const sanctionTurns = Math.max(0, state.sanctionTurns - 1);
+  const celebrationTurns = Math.max(0, state.celebrationTurns - 1);
+  const rivalRelationships = Object.fromEntries(RIVALS.map((rival) => {
+    if (state.wars[rival.id] === "war") return [rival.id, Math.min(15, state.rivalRelationships[rival.id])];
+    const diplomacyDelta = (state.tradePartner === rival.id && state.tradeRouteTurns > 0 ? 1 : 0)
+      + (state.researchPartner === rival.id && state.researchCollaborationTurns > 0 ? 1 : 0)
+      - (state.sanctionedRival === rival.id && state.sanctionTurns > 0 ? 1 : 0);
+    return [rival.id, Math.max(0, Math.min(100, state.rivalRelationships[rival.id] + diplomacyDelta + agendaRelationDelta(state, rival.id)))];
+  })) as Record<RivalId, number>;
+  const nextRivalEmpires = deriveRivalEmpires({ turn: state.turn + 1, ownedTiles: state.ownedTiles });
+  const rivalInfluence = Object.fromEntries(RIVALS.map((rival) => {
+    if (state.defeatedRivals.includes(rival.id)) return [rival.id, state.rivalInfluence[rival.id]];
+    const outputs = rivalYieldsFor(state, rival.id, nextRivalEmpires[rival.id]);
+    const sanctioned = state.sanctionedRival === rival.id && state.sanctionTurns > 0;
+    const gain = Math.max(1, Math.min(4, 1 + Math.floor((outputs.food + outputs.production + outputs.science + outputs.culture) / 6)) - (sanctioned ? 2 : 0));
+    return [rival.id, state.rivalInfluence[rival.id] + gain];
+  })) as Record<RivalId, number>;
+  const happiness = Math.min(HAPPINESS_TARGET, state.happiness + happinessGainFor({ ...state, cities }, totalPopulation({ cities }), allCompletedBuildings({ cities }).length, Math.max(...Object.values(rivalRelationships))));
+  const celebrationPending = state.celebrationPending || (happiness >= HAPPINESS_TARGET && celebrationTurns === 0);
+  units = units.map((unit) => ({ ...unit, hp: Math.min(UNIT_MAX_HP, unit.hp + 10), moves: maxMovesForUnit(unit.type, completedTechs, footballTurns) }));
+  const nextTurn = state.turn + 1;
+  const legacyWin = hasWonDawn({ cities, messiRecruited: state.messiRecruited, legacyPoints: state.legacyPoints });
+  const influenceLoss = Math.max(...Object.values(rivalInfluence)) >= 100;
+  events.push(`第 ${nextTurn} 回合开始；${cities.length} 座城市与所有单位已完成结算。`);
+  const message = events.join(" ");
+  return {
+    ...state,
+    turn: nextTurn,
+    cities,
+    ownedTiles: playerOwnedTilesForCities(cities),
+    units,
+    selectedUnitId,
+    selectedTile,
+    nextUnitSerial,
+    gold: state.gold + goldGain,
+    science: state.science + scienceGain,
+    culture: state.culture + cultureGain,
+    greatPoints: state.greatPoints + 3 + Math.floor(totalPopulation({ cities }) / 2) + (completedTechs.includes("broadcast") ? 2 : 0),
+    activeTech,
+    techProgress,
+    completedTechs,
+    activeCivic,
+    civicProgress,
+    completedCivics,
+    brazilInfluence: rivalInfluence.brazil,
+    influence: state.influence + influenceGainFor(state),
+    brazilRelationship: rivalRelationships.brazil,
+    rivalRelationships,
+    rivalInfluence,
+    tradePartner: tradeRouteTurns > 0 ? state.tradePartner : null,
+    researchPartner: researchCollaborationTurns > 0 ? state.researchPartner : null,
+    sanctionedRival: sanctionTurns > 0 ? state.sanctionedRival : null,
+    tradeRouteTurns,
+    researchCollaborationTurns,
+    sanctionTurns,
+    happiness,
+    celebration: celebrationTurns > 0 ? state.celebration : null,
+    celebrationTurns,
+    celebrationPending,
+    footballTurns,
+    message,
+    log: addLog(state.log, message),
+    result: legacyWin ? "win" : influenceLoss ? "lose" : state.result,
+    resultReason: legacyWin ? "legacy" : influenceLoss ? "influence" : state.resultReason,
+  };
+}
+
 function createInitialState(): GameState {
+  const capital = createPlayerCity("city-1", "布宜诺斯艾利斯", CITY_POS, true);
   return {
     turn: 1,
     gold: 80,
     science: 0,
     culture: 8,
     greatPoints: 18,
-    population: 1,
-    food: 8,
-    ownedTiles: INITIAL_OWNED_TILES,
-    ruralTiles: INITIAL_RURAL_TILES,
+    cities: [capital],
+    nextCitySerial: 2,
+    ownedTiles: playerOwnedTilesForCities([capital]),
     builtImprovements: {},
-    growthPending: 0,
     activeTech: "husbandry",
     techProgress: 0,
     completedTechs: [],
@@ -804,11 +1297,7 @@ function createInitialState(): GameState {
     civicProgress: 0,
     completedCivics: [],
     activePolicy: null,
-    activeProduction: null,
-    productionProgress: { monument: 0, granary: 0, academy: 0, workshop: 0, scout: 0, gaucho: 0 },
-    completedBuildings: [],
-    buildingPlacements: {},
-    units: [{ id: "gaucho-1", type: "gaucho", pos: { col: 6, row: 5 }, moves: 3 }],
+    units: [{ id: "gaucho-1", type: "gaucho", pos: { col: 6, row: 5 }, moves: 3, hp: UNIT_MAX_HP }],
     selectedUnitId: "gaucho-1",
     nextUnitSerial: 2,
     brazilPos: BRAZIL_SCOUT_START,
@@ -823,6 +1312,12 @@ function createInitialState(): GameState {
     tradeRouteTurns: 0,
     researchCollaborationTurns: 0,
     sanctionTurns: 0,
+    wars: { ...DEFAULT_WARS },
+    rivalUnits: initialRivalUnits(),
+    rivalMilitaryProgress: { ...DEFAULT_RIVAL_MILITARY_PROGRESS },
+    rivalCityHp: { ...DEFAULT_RIVAL_CITY_HP },
+    defeatedRivals: [],
+    nextRivalUnitSerial: RIVALS.length + 1,
     happiness: 28,
     celebration: null,
     celebrationTurns: 0,
@@ -837,9 +1332,10 @@ function createInitialState(): GameState {
     nextEventTurn: 2,
     claimedLegacyMilestones: [],
     legacyPoints: { ...DEFAULT_LEGACY_POINTS },
-    message: "阿根廷从首都一圈边界起步。人口开发新地块后，城市边界会自动向外包围一圈。",
-    log: ["高乔侦骑在布宜诺斯艾利斯整装待发；开发区块决定城市边界。"],
+    message: "从右侧为首都安排生产：训练开拓者可建立分城；在外交窗口宣战后，战斗单位可进攻敌军与首都。",
+    log: ["曙光循环开始：城市生产、开拓建城、外交宣战、单位作战与电脑回合已经连通。"],
     result: null,
+    resultReason: null,
   };
 }
 
@@ -860,7 +1356,7 @@ const isPolicyId = (value: unknown): value is PolicyId => typeof value === "stri
 const isCelebrationId = (value: unknown): value is CelebrationId => typeof value === "string" && Object.prototype.hasOwnProperty.call(CELEBRATIONS, value);
 const isProductionId = (value: unknown): value is ProductionId => typeof value === "string" && PRODUCTIONS.some((production) => production.id === value);
 const isBuildingId = (value: unknown): value is BuildingId => typeof value === "string" && PRODUCTIONS.some((production) => production.kind === "building" && production.id === value);
-const isUnitType = (value: unknown): value is UnitType => value === "scout" || value === "gaucho";
+const isUnitType = (value: unknown): value is UnitType => value === "scout" || value === "gaucho" || value === "settler";
 const isLegacyUnitType = (value: unknown) => isUnitType(value) || value === "builder";
 const isBuildableImprovementType = (value: unknown): value is BuildableImprovementType => value === "farm" || value === "ranch" || value === "mine" || value === "lumbermill" || value === "plantation";
 const isRivalId = (value: unknown): value is RivalId => typeof value === "string" && RIVALS.some((rival) => rival.id === value);
@@ -875,7 +1371,9 @@ function makeLocalSave(game: GameState): SaveEnvelope {
   };
 }
 
-function readLocalSave(raw: string | null): SaveReadResult {
+/* The v1-v5 migration parser is intentionally retired in v6. The user explicitly
+   chose a clean save break so cities and persistent armies can be validated as one model.
+function readLocalSaveV5(raw: string | null): SaveReadResult {
   if (!raw) return { ok: false, reason: "missing" };
   let parsed: unknown;
   try {
@@ -1136,6 +1634,108 @@ function readLocalSave(raw: string | null): SaveReadResult {
   };
   return { ok: true, savedAt: parsed.savedAt, game };
 }
+*/
+
+function readLocalSave(raw: string | null): SaveReadResult {
+  if (!raw) return { ok: false, reason: "missing" };
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return { ok: false, reason: "corrupt" };
+  }
+  if (!isRecord(parsed)) return { ok: false, reason: "corrupt" };
+  if (parsed.version !== SAVE_VERSION) return { ok: false, reason: "version" };
+  if (typeof parsed.savedAt !== "string" || Number.isNaN(Date.parse(parsed.savedAt)) || !isRecord(parsed.game)) return { ok: false, reason: "corrupt" };
+  const value = parsed.game;
+
+  if (!Array.isArray(value.cities) || value.cities.length < 1 || !Array.isArray(value.units) || !Array.isArray(value.rivalUnits)) return { ok: false, reason: "corrupt" };
+  const cityIds = new Set<string>();
+  const cityCenters = new Set<string>();
+  const developedTiles = new Set<string>();
+  const cities: PlayerCity[] = [];
+  for (const candidate of value.cities) {
+    if (!isRecord(candidate) || typeof candidate.id !== "string" || typeof candidate.name !== "string" || typeof candidate.isCapital !== "boolean" || !isPosition(candidate.pos)) return { ok: false, reason: "corrupt" };
+    if (!isNonNegativeInteger(candidate.population) || Number(candidate.population) < 1 || !isNonNegativeInteger(candidate.food) || !isNonNegativeInteger(candidate.growthPending) || !isNonNegativeInteger(candidate.hp) || Number(candidate.hp) > CITY_MAX_HP) return { ok: false, reason: "corrupt" };
+    if (cityIds.has(candidate.id) || cityCenters.has(idFor(candidate.pos))) return { ok: false, reason: "corrupt" };
+    if (!Array.isArray(candidate.ruralTiles) || !candidate.ruralTiles.every(isTileId) || new Set(candidate.ruralTiles).size !== candidate.ruralTiles.length) return { ok: false, reason: "corrupt" };
+    if (candidate.activeProduction !== null && !isProductionId(candidate.activeProduction)) return { ok: false, reason: "corrupt" };
+    if (!isRecord(candidate.productionProgress)) return { ok: false, reason: "corrupt" };
+    const progressRecord = candidate.productionProgress;
+    if (PRODUCTIONS.some((project) => !isNonNegativeInteger(progressRecord[project.id]) || Number(progressRecord[project.id]) > project.cost)) return { ok: false, reason: "corrupt" };
+    if (!Array.isArray(candidate.completedBuildings) || !candidate.completedBuildings.every(isBuildingId) || new Set(candidate.completedBuildings).size !== candidate.completedBuildings.length || !isRecord(candidate.buildingPlacements)) return { ok: false, reason: "corrupt" };
+    const buildingPlacements: Partial<Record<BuildingId, string>> = {};
+    for (const building of PRODUCTIONS.filter((project): project is BuildingProject => project.kind === "building")) {
+      const tileId = candidate.buildingPlacements[building.id];
+      if (tileId === undefined) continue;
+      if (!isTileId(tileId) || terrainAt(posForId(tileId)) === "water" || terrainAt(posForId(tileId)) === "mountain" || hexDistance(candidate.pos, posForId(tileId)) > 3) return { ok: false, reason: "corrupt" };
+      buildingPlacements[building.id] = tileId;
+    }
+    const city: PlayerCity = {
+      id: candidate.id,
+      name: candidate.name,
+      pos: candidate.pos,
+      isCapital: candidate.isCapital,
+      population: Number(candidate.population),
+      food: Number(candidate.food),
+      growthPending: Number(candidate.growthPending),
+      ruralTiles: candidate.ruralTiles as string[],
+      activeProduction: candidate.activeProduction as ProductionId | null,
+      productionProgress: Object.fromEntries(PRODUCTIONS.map((project) => [project.id, Number(progressRecord[project.id])])) as Record<ProductionId, number>,
+      completedBuildings: candidate.completedBuildings as BuildingId[],
+      buildingPlacements,
+      hp: Number(candidate.hp),
+    };
+    for (const tileId of cityDevelopedTileIds(city)) {
+      if (developedTiles.has(tileId)) return { ok: false, reason: "corrupt" };
+      developedTiles.add(tileId);
+    }
+    cityIds.add(city.id);
+    cityCenters.add(idFor(city.pos));
+    cities.push(city);
+  }
+  if (cities.filter((city) => city.isCapital).length !== 1 || cities.some((city, index) => cities.slice(index + 1).some((other) => hexDistance(city.pos, other.pos) < 4))) return { ok: false, reason: "corrupt" };
+
+  const readPlayerUnits: PlayerUnit[] = [];
+  const unitIds = new Set<string>();
+  const unitTiles = new Set<string>();
+  for (const candidate of value.units) {
+    if (!isRecord(candidate) || typeof candidate.id !== "string" || !isUnitType(candidate.type) || !isPosition(candidate.pos) || !isNonNegativeInteger(candidate.moves) || !isNonNegativeInteger(candidate.hp) || Number(candidate.hp) < 1 || Number(candidate.hp) > UNIT_MAX_HP) return { ok: false, reason: "corrupt" };
+    if (unitIds.has(candidate.id) || unitTiles.has(idFor(candidate.pos))) return { ok: false, reason: "corrupt" };
+    unitIds.add(candidate.id);
+    unitTiles.add(idFor(candidate.pos));
+    readPlayerUnits.push({ id: candidate.id, type: candidate.type, pos: candidate.pos, moves: Number(candidate.moves), hp: Number(candidate.hp) });
+  }
+  const readRivalUnits: RivalUnit[] = [];
+  for (const candidate of value.rivalUnits) {
+    if (!isRecord(candidate) || typeof candidate.id !== "string" || !isRivalId(candidate.rivalId) || candidate.type !== "warrior" || !isPosition(candidate.pos) || !isNonNegativeInteger(candidate.moves) || !isNonNegativeInteger(candidate.hp) || Number(candidate.hp) < 1 || Number(candidate.hp) > UNIT_MAX_HP) return { ok: false, reason: "corrupt" };
+    if (unitIds.has(candidate.id) || unitTiles.has(idFor(candidate.pos))) return { ok: false, reason: "corrupt" };
+    unitIds.add(candidate.id);
+    unitTiles.add(idFor(candidate.pos));
+    readRivalUnits.push({ id: candidate.id, rivalId: candidate.rivalId, type: "warrior", pos: candidate.pos, moves: Number(candidate.moves), hp: Number(candidate.hp) });
+  }
+
+  if (!Array.isArray(value.ownedTiles) || !value.ownedTiles.every(isTileId) || !Array.isArray(value.discovered) || !value.discovered.every(isTileId)) return { ok: false, reason: "corrupt" };
+  const expectedOwned = playerOwnedTilesForCities(cities);
+  const savedOwned = new Set(value.ownedTiles as string[]);
+  if (savedOwned.size !== expectedOwned.length || expectedOwned.some((tileId) => !savedOwned.has(tileId))) return { ok: false, reason: "corrupt" };
+  if (!isRecord(value.wars) || !isRecord(value.rivalMilitaryProgress) || !isRecord(value.rivalCityHp) || !Array.isArray(value.defeatedRivals) || !value.defeatedRivals.every(isRivalId)) return { ok: false, reason: "corrupt" };
+  if (RIVALS.some((rival) => (value.wars as Record<string, unknown>)[rival.id] !== "peace" && (value.wars as Record<string, unknown>)[rival.id] !== "war")) return { ok: false, reason: "corrupt" };
+  if (RIVALS.some((rival) => !isNonNegativeInteger((value.rivalMilitaryProgress as Record<string, unknown>)[rival.id]) || !isNonNegativeInteger((value.rivalCityHp as Record<string, unknown>)[rival.id]) || Number((value.rivalCityHp as Record<string, unknown>)[rival.id]) > CITY_MAX_HP)) return { ok: false, reason: "corrupt" };
+  const requiredIntegers = ["turn", "gold", "science", "culture", "greatPoints", "techProgress", "civicProgress", "nextUnitSerial", "nextCitySerial", "nextRivalUnitSerial", "influence", "brazilInfluence", "tradeRouteTurns", "researchCollaborationTurns", "sanctionTurns", "happiness", "celebrationTurns", "footballTurns", "nextEventTurn"];
+  if (requiredIntegers.some((field) => !isNonNegativeInteger(value[field])) || Number(value.turn) < 1 || !isPosition(value.brazilPos) || typeof value.message !== "string" || !Array.isArray(value.log)) return { ok: false, reason: "corrupt" };
+
+  const game = {
+    ...(value as unknown as SavedGameState),
+    cities,
+    units: readPlayerUnits,
+    rivalUnits: readRivalUnits,
+    ownedTiles: expectedOwned,
+    discovered: new Set(value.discovered as string[]),
+  } as GameState;
+  if (game.selectedUnitId !== null && !readPlayerUnits.some((unit) => unit.id === game.selectedUnitId)) game.selectedUnitId = null;
+  return { ok: true, savedAt: parsed.savedAt, game };
+}
 
 function formatSaveTime(savedAt: string) {
   return new Intl.DateTimeFormat("zh-CN", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" }).format(new Date(savedAt));
@@ -1149,20 +1749,13 @@ function nextBrazilPosition(state: GameState) {
   return candidates.length ? candidates[state.turn % candidates.length] : state.brazilPos;
 }
 
-function rivalPatrolsFor(state: Pick<GameState, "turn" | "ownedTiles" | "brazilPos">) {
-  const empires = deriveRivalEmpires(state);
-  return RIVALS.map((rival, index) => {
-    if (rival.id === "brazil") return { rival, pos: state.brazilPos };
-    const candidates = empires[rival.id].ownedTiles.map(posForId).filter((pos) => {
-      const terrain = terrainAt(pos);
-      return terrain !== "water" && terrain !== "mountain" && idFor(pos) !== idFor(rival.capital);
-    });
-    return { rival, pos: candidates.length ? candidates[(state.turn + index * 2) % candidates.length] : rival.capital };
-  });
+function rivalPatrolsFor(state: Pick<GameState, "rivalUnits">) {
+  return state.rivalUnits.map((unit) => ({ ...unit, rival: RIVAL_BY_ID[unit.rivalId] }));
 }
 
 export default function Home() {
   const [game, setGame] = useState<GameState>(createInitialState);
+  const [managingCityId, setManagingCityId] = useState<CityId>("city-1");
   const [selectedRivalId, setSelectedRivalId] = useState<RivalId>("brazil");
   const [techPickerOpen, setTechPickerOpen] = useState(false);
   const [productionDrawerOpen, setProductionDrawerOpen] = useState(false);
@@ -1238,34 +1831,40 @@ export default function Home() {
 
   const activeTech = TECHS.find((tech) => tech.id === game.activeTech) ?? null;
   const activeCivic = CIVICS.find((civic) => civic.id === game.activeCivic) ?? null;
-  const activeProduction = PRODUCTIONS.find((item) => item.id === game.activeProduction) ?? null;
+  const managingCity = cityById(game, managingCityId) ?? capitalCity(game) ?? game.cities[0];
+  const pendingGrowthCity = game.cities.find((city) => city.growthPending > 0) ?? null;
+  const totalGrowthPending = game.cities.reduce((sum, city) => sum + city.growthPending, 0);
+  const activeProduction = PRODUCTIONS.find((item) => item.id === managingCity.activeProduction) ?? null;
   const cityYields = cityYieldTotals(game);
-  const productionPerTurn = Math.max(1, cityYields.production);
-  const activeProductionProgress = activeProduction ? game.productionProgress[activeProduction.id] : 0;
+  const managingCityYields = cityYieldTotalsFor(game, managingCity.id);
+  const productionPerTurn = Math.max(1, managingCityYields.production);
+  const activeProductionProgress = activeProduction ? managingCity.productionProgress[activeProduction.id] : 0;
   const productionTurnsRemaining = activeProduction
     ? Math.max(1, Math.ceil((activeProduction.cost - activeProductionProgress) / productionPerTurn))
     : null;
   const hasAvailableProduction = true;
   const selectedUnit = game.units.find((unit) => unit.id === game.selectedUnitId) ?? null;
   const selectedUnitInfo = selectedUnit ? UNIT_INFO[selectedUnit.type] : null;
-  const citySelected = !selectedUnit && game.selectedTile === idFor(CITY_POS);
-  const selectedForeignCiv = !selectedUnit && game.selectedTile ? rivalCapitalAt(posForId(game.selectedTile)) : null;
+  const selectedPlayerCity = !selectedUnit && game.selectedTile ? playerCityAt(game, posForId(game.selectedTile)) : null;
+  const citySelected = Boolean(selectedPlayerCity);
+  const selectedForeignCivCandidate = !selectedUnit && game.selectedTile ? rivalCapitalAt(posForId(game.selectedTile)) : null;
+  const selectedForeignCiv = selectedForeignCivCandidate && !game.defeatedRivals.includes(selectedForeignCivCandidate.id) ? selectedForeignCivCandidate : null;
   const foreignCitySelected = Boolean(selectedForeignCiv);
   const selectedRival = RIVAL_BY_ID[selectedRivalId];
   const rivalEmpires = useMemo(() => deriveRivalEmpires({ turn: game.turn, ownedTiles: game.ownedTiles }), [game.turn, game.ownedTiles]);
   const rivalTerritoryOwnerByTile = useMemo(() => {
     const map = new Map<string, RivalDefinition>();
-    RIVALS.forEach((rival) => rivalEmpires[rival.id].ownedTiles.forEach((tileId) => map.set(tileId, rival)));
+    RIVALS.filter((rival) => !game.defeatedRivals.includes(rival.id)).forEach((rival) => rivalEmpires[rival.id].ownedTiles.forEach((tileId) => map.set(tileId, rival)));
     return map;
-  }, [rivalEmpires]);
+  }, [game.defeatedRivals, rivalEmpires]);
   const rivalEdgePaths = useMemo(() => Object.fromEntries(RIVALS.map((rival) => {
-    const territory = new Set(rivalEmpires[rival.id].ownedTiles);
+    const territory = new Set(game.defeatedRivals.includes(rival.id) ? [] : rivalEmpires[rival.id].ownedTiles);
     return [rival.id, territoryEdgePath((pos) => territory.has(idFor(pos)))];
-  })) as Record<RivalId, string>, [rivalEmpires]);
+  })) as Record<RivalId, string>, [game.defeatedRivals, rivalEmpires]);
   const activeAiPlan = aiPhaseIndex === null ? null : aiTurnPlan[aiPhaseIndex] ?? null;
   const activeAiRival = activeAiPlan ? RIVAL_BY_ID[activeAiPlan.rivalId] : null;
   const foreignPopulation = selectedForeignCiv ? rivalEmpires[selectedForeignCiv.id].population : 0;
-  const growthChoosing = growthDrawerOpen && game.growthPending > 0;
+  const growthChoosing = growthDrawerOpen && managingCity.growthPending > 0;
   const happinessPerTurn = happinessGainFor(game);
   const influencePerTurn = influenceGainFor(game);
   const selectedRelationship = game.rivalRelationships[selectedRivalId];
@@ -1273,24 +1872,25 @@ export default function Home() {
   const foreignYields = selectedForeignCiv ? rivalYieldsFor(game, selectedForeignCiv.id, rivalEmpires[selectedForeignCiv.id]) : null;
   const worldLeader = RIVALS.reduce((leader, rival) => game.rivalInfluence[rival.id] > game.rivalInfluence[leader.id] ? rival : leader, RIVALS[0]);
   const visibleTiles = useMemo(() => {
-    let visible = reveal(new Set<string>(), CITY_POS, 1);
+    let visible = new Set<string>();
+    game.cities.forEach((city) => { visible = reveal(visible, city.pos, 2); });
     game.ownedTiles.forEach((tileId) => { visible = reveal(visible, posForId(tileId), 1); });
     game.units.forEach((unit) => { visible = reveal(visible, unit.pos, unit.type === "scout" ? 2 : 1); });
     return visible;
-  }, [game.ownedTiles, game.units]);
+  }, [game.cities, game.ownedTiles, game.units]);
   const argentinaEdgePath = useMemo(() => territoryEdgePath((pos) => isArgentineTerritory(game, pos)), [game]);
   const rivalPatrols = rivalPatrolsFor(game);
   const rivalPatrolTileIds = useMemo(() => new Set(rivalPatrols.map((patrol) => idFor(patrol.pos))), [rivalPatrols]);
   const visibleRivalPatrols = rivalPatrols.filter((patrol) => visibleTiles.has(idFor(patrol.pos)));
   const placingItem = PRODUCTIONS.find((item): item is BuildingProject => item.id === placingProduction && item.kind === "building") ?? null;
   const placedProductionByTile = useMemo(() => {
-    const map = new Map<string, BuildingId>();
-    Object.entries(game.buildingPlacements).forEach(([productionId, tileId]) => {
-      if (tileId) map.set(tileId, productionId as BuildingId);
-    });
+    const map = new Map<string, { cityId: CityId; buildingId: BuildingId }>();
+    game.cities.forEach((city) => Object.entries(city.buildingPlacements).forEach(([productionId, tileId]) => {
+      if (tileId) map.set(tileId, { cityId: city.id, buildingId: productionId as BuildingId });
+    }));
     return map;
-  }, [game.buildingPlacements]);
-  const playerDevelopedTiles = useMemo(() => new Set(playerDevelopedTileIds({ ruralTiles: game.ruralTiles, buildingPlacements: game.buildingPlacements })), [game.ruralTiles, game.buildingPlacements]);
+  }, [game.cities]);
+  const playerDevelopedTiles = useMemo(() => new Set(playerDevelopedTileIds(game)), [game]);
   const placementOptions = useMemo(() => {
     const map = new Map<string, { error: string | null; adjacency: number }>();
     if (!placingProduction) return map;
@@ -1298,12 +1898,12 @@ export default function Home() {
       const pos = { col: tile.col, row: tile.row };
       const tileId = idFor(pos);
       map.set(tileId, {
-        error: productionPlacementError(game, placingProduction, pos, rivalPatrolTileIds),
+        error: productionPlacementError(game, managingCity.id, placingProduction, pos, rivalPatrolTileIds),
         adjacency: placementAdjacencyFor(game, placingProduction, pos),
       });
     });
     return map;
-  }, [game, placingProduction, rivalPatrolTileIds]);
+  }, [game, managingCity.id, placingProduction, rivalPatrolTileIds]);
   const bestPlacementAdjacency = placingProduction
     ? Math.max(0, ...Array.from(placementOptions.values()).filter((option) => !option.error).map((option) => option.adjacency))
     : 0;
@@ -1313,44 +1913,46 @@ export default function Home() {
   const placementPreviewTerrain = placementPreviewPos ? TERRAIN_INFO[terrainAt(placementPreviewPos)] : null;
   const growthOptions = useMemo(() => {
     const map = new Map<string, { improvement: BuildableImprovementType; expands: boolean; borderGain: number; before: TileYields; after: TileYields; score: number }>();
-    if (game.growthPending <= 0) return map;
+    if (managingCity.growthPending <= 0) return map;
     MAP_TILES.forEach((tile) => {
       const pos = { col: tile.col, row: tile.row };
       const tileId = idFor(pos);
-      if (growthTileError(game, pos, rivalTerritoryOwnerByTile.get(tileId) ?? null)) return;
+      if (growthTileError(game, managingCity.id, pos, rivalTerritoryOwnerByTile.get(tileId) ?? null)) return;
       const improvement = automaticImprovementFor(pos)!;
-      const ruralTiles = [...game.ruralTiles, tileId];
-      const ownedTiles = territoryFromDeveloped([idFor(CITY_POS), ...ruralTiles, ...Object.values(game.buildingPlacements).filter((placedTile): placedTile is string => Boolean(placedTile))]);
+      const cities = game.cities.map((city) => city.id === managingCity.id ? { ...city, ruralTiles: [...city.ruralTiles, tileId] } : city);
+      const ownedTiles = playerOwnedTilesForCities(cities);
       const borderGain = ownedTiles.filter((ownedTile) => !game.ownedTiles.includes(ownedTile)).length;
       const expands = borderGain > 0;
       const before = tileYieldsForState(game, pos);
-      const previewState: GameState = { ...game, ownedTiles, ruralTiles, builtImprovements: { ...game.builtImprovements, [tileId]: improvement } };
+      const previewState: GameState = { ...game, cities, ownedTiles, builtImprovements: { ...game.builtImprovements, [tileId]: improvement } };
       const after = tileYieldsForState(previewState, pos);
       const score = after.food * 1.25 + after.production * 1.2 + after.science + after.culture + after.gold * .75 + borderGain * .12;
       map.set(tileId, { improvement, expands, borderGain, before, after, score });
     });
     return map;
-  }, [game, rivalTerritoryOwnerByTile]);
+  }, [game, managingCity, rivalTerritoryOwnerByTile]);
   const recommendedGrowthOptions = Array.from(growthOptions.entries()).sort((a, b) => b[1].score - a[1].score).slice(0, 3);
   const growthPreviewTile = growthCandidate ?? hoveredGrowthTile;
   const growthPreviewOption = growthPreviewTile ? growthOptions.get(growthPreviewTile) ?? null : null;
   const growthPreviewPos = growthPreviewTile ? posForId(growthPreviewTile) : null;
   const growthPreviewResource = growthPreviewTile && RESOURCE_TILES[growthPreviewTile] ? RESOURCE_INFO[RESOURCE_TILES[growthPreviewTile]] : null;
-  const developedResources = game.ruralTiles.flatMap((tileId) => RESOURCE_TILES[tileId] ? [RESOURCE_INFO[RESOURCE_TILES[tileId]]] : []);
+  const developedResources = allRuralTiles(game).flatMap((tileId) => RESOURCE_TILES[tileId] ? [RESOURCE_INFO[RESOURCE_TILES[tileId]]] : []);
   const selectedPos = game.selectedTile
     ? posForId(game.selectedTile)
     : selectedUnit?.pos ?? CITY_POS;
   const selectedKnown = game.discovered.has(idFor(selectedPos));
-  const selectedForeignCity = selectedKnown ? rivalCapitalAt(selectedPos) : null;
+  const selectedForeignCityCandidate = selectedKnown ? rivalCapitalAt(selectedPos) : null;
+  const selectedForeignCity = selectedForeignCityCandidate && !game.defeatedRivals.includes(selectedForeignCityCandidate.id) ? selectedForeignCityCandidate : null;
   const selectedTerritoryRival = selectedKnown ? rivalTerritoryOwnerByTile.get(idFor(selectedPos)) ?? null : null;
   const selectedTerrain = terrainAt(selectedPos);
   const selectedImprovement = improvementAt(game, idFor(selectedPos));
-  const selectedPlacedProductionId = placedProductionByTile.get(idFor(selectedPos)) ?? null;
+  const selectedPlacedInfo = placedProductionByTile.get(idFor(selectedPos)) ?? null;
+  const selectedPlacedProductionId = selectedPlacedInfo?.buildingId ?? null;
   const selectedPlacedProduction = PRODUCTIONS.find((item) => item.id === selectedPlacedProductionId) ?? null;
   const selectedPlacedStatus = selectedPlacedProductionId
-    ? game.completedBuildings.includes(selectedPlacedProductionId)
+    ? cityById(game, selectedPlacedInfo!.cityId)?.completedBuildings.includes(selectedPlacedProductionId)
       ? "已建成"
-      : game.activeProduction === selectedPlacedProductionId ? "建造中" : "已规划"
+      : cityById(game, selectedPlacedInfo!.cityId)?.activeProduction === selectedPlacedProductionId ? "建造中" : "已规划"
     : null;
   const yieldsFor = (pos: Position) => tileYieldsForState(game, pos);
   const selectedYield = yieldsFor(selectedPos);
@@ -1358,17 +1960,26 @@ export default function Home() {
   const maxMoves = selectedUnit ? maxMovesForUnit(selectedUnit.type, game.completedTechs, game.footballTurns) : 0;
   const movementCosts = (() => {
     if (placingProduction || growthChoosing || !selectedUnit || selectedUnit.moves <= 0) return new Map<string, number>();
-    const blockers = new Set<string>(RIVALS.map((rival) => idFor(rival.capital)));
+    const blockers = new Set<string>(RIVALS.filter((rival) => !game.defeatedRivals.includes(rival.id)).map((rival) => idFor(rival.capital)));
     visibleRivalPatrols.forEach((patrol) => blockers.add(idFor(patrol.pos)));
     game.units.forEach((unit) => { if (unit.id !== selectedUnit.id) blockers.add(idFor(unit.pos)); });
     return movementRange(selectedUnit.pos, selectedUnit.moves, blockers, game.discovered);
+  })();
+  const attackTargets = (() => {
+    const targets = new Set<string>();
+    if (!selectedUnit || selectedUnit.moves <= 0 || UNIT_INFO[selectedUnit.type].role !== "combat") return targets;
+    game.rivalUnits.forEach((unit) => {
+      if (game.wars[unit.rivalId] === "war" && hexDistance(selectedUnit.pos, unit.pos) === 1) targets.add(idFor(unit.pos));
+    });
+    RIVALS.forEach((rival) => {
+      if (!game.defeatedRivals.includes(rival.id) && game.wars[rival.id] === "war" && hexDistance(selectedUnit.pos, rival.capital) === 1) targets.add(idFor(rival.capital));
+    });
+    return targets;
   })();
   const revealedCount = game.discovered.size;
   const legacyMilestones = legacyMilestonesFor(game);
   const readyLegacyMilestone = legacyMilestones.find((milestone) => milestone.progress >= milestone.target && !game.claimedLegacyMilestones.includes(milestone.id)) ?? null;
   const victoryReady = hasWonDawn(game);
-  const addLog = (log: string[], entry: string) => [entry, ...log].slice(0, 4);
-
   const stopTransientFlow = () => {
     aiRunIdRef.current += 1;
     if (aiTimerRef.current) clearTimeout(aiTimerRef.current);
@@ -1409,23 +2020,27 @@ export default function Home() {
     setProductionDrawerOpen(false);
   };
 
-  const openCapitalProduction = () => {
+  const openCapitalProduction = (cityId: CityId = managingCity.id, preferredCategory?: "buildings" | "units") => {
     if (aiThinking || game.result) return;
-    if (game.growthPending > 0) {
+    const targetCity = cityById(game, cityId) ?? managingCity;
+    setManagingCityId(targetCity.id);
+    if (targetCity.growthPending > 0) {
       setProductionDrawerOpen(false); setStrategyDrawerOpen(false); setGrowthCandidate(null); setGrowthDrawerOpen(true);
-      setGame((prev) => ({ ...prev, selectedUnitId: null, selectedTile: idFor(CITY_POS), message: "请先完成城市成长选择，再安排生产。" }));
+      setGame((prev) => ({ ...prev, selectedUnitId: null, selectedTile: idFor(targetCity.pos), message: `请先完成${targetCity.name}的成长选择，再安排生产。` }));
       return;
     }
-    setProductionCategory(activeProduction?.kind === "unit" ? "units" : "buildings");
+    const targetProduction = PRODUCTIONS.find((item) => item.id === targetCity.activeProduction) ?? null;
+    setProductionCategory(preferredCategory ?? (targetProduction?.kind === "unit" ? "units" : "buildings"));
     setGame((prev) => {
-      const currentProject = PRODUCTIONS.find((item) => item.id === prev.activeProduction);
+      const currentCity = cityById(prev, targetCity.id) ?? targetCity;
+      const currentProject = PRODUCTIONS.find((item) => item.id === currentCity.activeProduction);
       return {
         ...prev,
-        selectedTile: idFor(CITY_POS),
+        selectedTile: idFor(currentCity.pos),
         selectedUnitId: null,
         message: currentProject
-          ? `布宜诺斯艾利斯正在${currentProject.kind === "unit" ? "训练" : "建造"}${currentProject.name}。`
-          : "请为布宜诺斯艾利斯安排一个生产项目。",
+          ? `${currentCity.name}正在${currentProject.kind === "unit" ? "训练" : "建造"}${currentProject.name}。`
+          : `请为${currentCity.name}安排一个生产项目。`,
       };
     });
     setTechPickerOpen(false);
@@ -1441,14 +2056,19 @@ export default function Home() {
   const openGrowth = () => {
     if (aiThinking || game.result) return;
     setTechPickerOpen(false); closeProductionDrawer(); setStrategyDrawerOpen(false); setGrowthCandidate(null); setHoveredGrowthTile(null); setGrowthDrawerOpen(true);
-    setGame((prev) => ({ ...prev, selectedUnitId: null, selectedTile: idFor(CITY_POS), message: prev.growthPending > 0 ? "人口已增长：请选择一个六角格，系统会同时扩张边界并自动建设改良。" : "城市成长由粮食驱动；成长槽满后即可开发一个新地块。" }));
+    setGame((prev) => {
+      const city = cityById(prev, managingCity.id) ?? managingCity;
+      return { ...prev, selectedUnitId: null, selectedTile: idFor(city.pos), message: city.growthPending > 0 ? `${city.name}人口已增长：请选择一个六角格，系统会同时扩张边界并自动建设改良。` : `${city.name}的成长由粮食驱动；成长槽满后即可开发一个新地块。` };
+    });
   };
 
   const openStrategy = (tab: "civics" | "diplomacy" | "happiness") => {
     if (aiThinking || game.result) return;
-    if (game.growthPending > 0) {
+    const pendingGrowthCity = game.cities.find((city) => city.growthPending > 0);
+    if (pendingGrowthCity) {
+      setManagingCityId(pendingGrowthCity.id);
       setStrategyDrawerOpen(false); setGrowthCandidate(null); setGrowthDrawerOpen(true);
-      setGame((prev) => ({ ...prev, message: "请先为新人口选择开发地块；随后可以继续管理帝国。" }));
+      setGame((prev) => ({ ...prev, selectedTile: idFor(pendingGrowthCity.pos), message: `请先为${pendingGrowthCity.name}的新人口选择开发地块；随后可以继续管理帝国。` }));
       return;
     }
     setTechPickerOpen(false);
@@ -1483,10 +2103,14 @@ export default function Home() {
     }));
   };
 
-  const handleDiplomaticAction = (action: "trade" | "research" | "sanction") => {
+  const handleDiplomaticAction = (action: "trade" | "research" | "sanction" | "war") => {
     if (aiThinking || aiLockRef.current) return;
     const targetId = selectedRivalId;
     const target = RIVAL_BY_ID[targetId];
+    if (action === "war") {
+      setGame((prev) => declareWar(prev, targetId));
+      return;
+    }
     const config = {
       trade: { cost: 12, relation: 6, message: `阿根廷与${target.name}建立了 6 回合贸易路线，并引入${RESOURCE_INFO[target.resource].name}。` },
       research: { cost: 18, relation: 5, message: `阿根廷与${target.name}启动 4 回合联合研究计划。` },
@@ -1546,10 +2170,11 @@ export default function Home() {
       if (eventId === "worldCouncil" && choiceId === "embassy") { next = { ...next, influence: next.influence + 18, rivalRelationships: improveAllRelations(3), brazilRelationship: Math.min(100, next.brazilRelationship + 3) }; }
       if (eventId === "worldCouncil" && choiceId === "markets") next = { ...next, gold: next.gold + 30 };
       if (eventId === "worldCouncil" && choiceId === "scholars") next = { ...next, science: next.science + 15, techProgress: next.techProgress + 15, culture: next.culture + 8, civicProgress: next.civicProgress + 8 };
-      if (eventId === "pampasVoices" && choiceId === "fields") next = { ...next, food: next.food + 12, happiness: next.happiness + 5 };
+      if (eventId === "pampasVoices" && choiceId === "fields") next = { ...next, cities: next.cities.map((city) => city.isCapital ? { ...city, food: city.food + 12 } : city), happiness: next.happiness + 5 };
       if (eventId === "pampasVoices" && choiceId === "shops") {
-        const project = PRODUCTIONS.find((item) => item.id === next.activeProduction);
-        next = project ? { ...next, productionProgress: { ...next.productionProgress, [project.id]: Math.min(project.cost - 1, next.productionProgress[project.id] + 10) } } : { ...next, gold: next.gold + 18 };
+        const capital = capitalCity(next);
+        const project = PRODUCTIONS.find((item) => item.id === capital?.activeProduction);
+        next = project && capital ? { ...next, cities: next.cities.map((city) => city.id === capital.id ? { ...city, productionProgress: { ...city.productionProgress, [project.id]: Math.min(project.cost - 1, city.productionProgress[project.id] + 10) } } : city) } : { ...next, gold: next.gold + 18 };
       }
       if (eventId === "pampasVoices" && choiceId === "squares") next = { ...next, culture: next.culture + 12, civicProgress: next.civicProgress + 12, greatPoints: next.greatPoints + 5 };
       if (eventId === "distantHorizon" && choiceId === "survey") next = { ...next, science: next.science + 12, techProgress: next.techProgress + 12 };
@@ -1567,30 +2192,33 @@ export default function Home() {
   };
 
   const confirmGrowthSelection = () => {
-    if (aiThinking || aiLockRef.current || !growthCandidate || game.growthPending <= 0) return;
+    if (aiThinking || aiLockRef.current || !growthCandidate || managingCity.growthPending <= 0) return;
     const tileId = growthCandidate;
     const pos = posForId(tileId);
-    if (growthTileError(game, pos) || !growthOptions.get(tileId)) return;
-    const remainingAfterChoice = Math.max(0, game.growthPending - 1);
-    const nextPopulation = game.population + 1;
-    const chainedGrowth = remainingAfterChoice === 0 && game.food >= 10 + nextPopulation * 4;
+    if (growthTileError(game, managingCity.id, pos) || !growthOptions.get(tileId)) return;
+    const remainingAfterChoice = Math.max(0, managingCity.growthPending - 1);
+    const nextPopulation = managingCity.population + 1;
+    const chainedGrowth = remainingAfterChoice === 0 && managingCity.food >= 10 + nextPopulation * 4;
     setGame((prev) => {
-      const error = growthTileError(prev, pos);
-      if (error || prev.growthPending <= 0) return { ...prev, message: error ? `无法开发：${error}。` : prev.message };
+      const currentCity = cityById(prev, managingCity.id);
+      if (!currentCity) return prev;
+      const error = growthTileError(prev, currentCity.id, pos);
+      if (error || currentCity.growthPending <= 0) return { ...prev, message: error ? `无法开发：${error}。` : prev.message };
       const improvement = automaticImprovementFor(pos)!;
-      const population = prev.population + 1;
-      let growthPending = Math.max(0, prev.growthPending - 1);
-      let food = prev.food;
+      const population = currentCity.population + 1;
+      let growthPending = Math.max(0, currentCity.growthPending - 1);
+      let food = currentCity.food;
       const nextTarget = 10 + population * 4;
       if (growthPending === 0 && food >= nextTarget) { food -= nextTarget; growthPending += 1; }
-      const ruralTiles = [...prev.ruralTiles, tileId];
-      const ownedTiles = territoryFromDeveloped([idFor(CITY_POS), ...ruralTiles, ...Object.values(prev.buildingPlacements).filter((placedTile): placedTile is string => Boolean(placedTile))]);
+      const ruralTiles = [...currentCity.ruralTiles, tileId];
+      const cities = prev.cities.map((city) => city.id === currentCity.id ? { ...city, population, food, growthPending, ruralTiles } : city);
+      const ownedTiles = playerOwnedTilesForCities(cities);
       const borderGain = ownedTiles.filter((ownedTile) => !prev.ownedTiles.includes(ownedTile)).length;
       const builtImprovements = { ...prev.builtImprovements, [tileId]: improvement };
       const discovered = reveal(prev.discovered, pos, 1);
-      const message = `开发区新增${IMPROVEMENT_INFO[improvement].name}，边界${borderGain > 0 ? `向外新增 ${borderGain} 格` : "保持紧凑"}；布宜诺斯艾利斯达到 ${population} 人口。`;
-      const won = hasWonDawn({ population, messiRecruited: prev.messiRecruited, legacyPoints: prev.legacyPoints });
-      return { ...prev, population, food, ownedTiles, ruralTiles, builtImprovements, growthPending, discovered, selectedTile: tileId, selectedUnitId: null, message, log: addLog(prev.log, message), result: won ? "win" : prev.result };
+      const message = `开发区新增${IMPROVEMENT_INFO[improvement].name}，边界${borderGain > 0 ? `向外新增 ${borderGain} 格` : "保持紧凑"}；${currentCity.name}达到 ${population} 人口。`;
+      const won = hasWonDawn({ cities, messiRecruited: prev.messiRecruited, legacyPoints: prev.legacyPoints });
+      return { ...prev, cities, ownedTiles, builtImprovements, discovered, selectedTile: tileId, selectedUnitId: null, message, log: addLog(prev.log, message), result: won ? "win" : prev.result, resultReason: won ? "legacy" : prev.resultReason };
     });
     setNewlyClaimedTile(tileId); setGrowthCandidate(null); setHoveredGrowthTile(null);
     if (!chainedGrowth && remainingAfterChoice === 0) setGrowthDrawerOpen(false);
@@ -1601,7 +2229,7 @@ export default function Home() {
     if (aiThinking || game.result) return;
     if (growthChoosing) {
       const tileId = idFor(pos);
-      const error = growthTileError(game, pos);
+      const error = growthTileError(game, managingCity.id, pos);
       if (error) { setGrowthCandidate(null); setGame((prev) => ({ ...prev, selectedTile: tileId, selectedUnitId: null, message: `不能选择这里：${error}。` })); return; }
       const option = growthOptions.get(tileId)!;
       setGrowthCandidate(tileId);
@@ -1610,7 +2238,7 @@ export default function Home() {
     }
     if (placingProduction) {
       const tileId = idFor(pos);
-      const placementError = productionPlacementError(game, placingProduction, pos);
+      const placementError = productionPlacementError(game, managingCity.id, placingProduction, pos);
       if (placementError) {
         setPlacementCandidate(null);
         setGame((prev) => ({ ...prev, selectedTile: tileId, selectedUnitId: null, message: `不能在这里建造：${placementError}。` }));
@@ -1622,12 +2250,22 @@ export default function Home() {
       setGame((prev) => ({ ...prev, selectedTile: tileId, selectedUnitId: null, message: `预览${item.name}：${TERRAIN_INFO[terrainAt(pos)].label}，相邻加成 +${adjacency} ${YIELD_META[item.yield].label}。` }));
       return;
     }
-    if (idFor(pos) === idFor(CITY_POS) && !selectedUnit) {
-      openCapitalProduction();
+    const clickedPlayerCity = playerCityAt(game, pos);
+    if (clickedPlayerCity && !selectedUnit) {
+      openCapitalProduction(clickedPlayerCity.id);
       return;
     }
-    const clickedRival = rivalCapitalAt(pos);
+    const clickedRivalCandidate = rivalCapitalAt(pos);
+    const clickedRival = clickedRivalCandidate && !game.defeatedRivals.includes(clickedRivalCandidate.id) ? clickedRivalCandidate : null;
     if (clickedRival) setSelectedRivalId(clickedRival.id);
+    const clickedEnemyUnit = game.rivalUnits.find((unit) => idFor(unit.pos) === idFor(pos)) ?? null;
+    const peaceTargetId = clickedEnemyUnit?.rivalId ?? clickedRival?.id;
+    if (selectedUnit && peaceTargetId && UNIT_INFO[selectedUnit.type].role === "combat" && hexDistance(selectedUnit.pos, pos) === 1 && game.wars[peaceTargetId] === "peace") {
+      setSelectedRivalId(peaceTargetId);
+      setTechPickerOpen(false); closeProductionDrawer(); setGrowthDrawerOpen(false); setStrategyTab("diplomacy"); setStrategyDrawerOpen(true);
+      setGame((prev) => ({ ...prev, message: `与${RIVAL_BY_ID[peaceTargetId].name}仍处于和平状态；请在右侧外交窗口宣战后再攻击。` }));
+      return;
+    }
     setGame((prev) => {
       const tileId = idFor(pos);
       const terrain = terrainAt(pos);
@@ -1636,9 +2274,12 @@ export default function Home() {
       const cityBlocked = Boolean(clickedRival);
       const occupiedByPatrol = rivalPatrolsFor(prev).find((patrol) => tileId === idFor(patrol.pos)) ?? null;
       const rivalOccupied = Boolean(occupiedByPatrol);
-      const blockers = new Set<string>(RIVALS.map((rival) => idFor(rival.capital)));
+      const blockers = new Set<string>(RIVALS.filter((rival) => !prev.defeatedRivals.includes(rival.id)).map((rival) => idFor(rival.capital)));
       rivalPatrolsFor(prev).filter((patrol) => visibleTiles.has(idFor(patrol.pos))).forEach((patrol) => blockers.add(idFor(patrol.pos)));
       const activeUnit = prev.units.find((unit) => unit.id === prev.selectedUnitId) ?? null;
+      if (activeUnit && hexDistance(activeUnit.pos, pos) === 1 && (occupiedByPatrol || clickedRival) && UNIT_INFO[activeUnit.type].role === "combat") {
+        return resolvePlayerAttack(prev, activeUnit.id, pos);
+      }
       prev.units.forEach((unit) => { if (unit.id !== activeUnit?.id) blockers.add(idFor(unit.pos)); });
       const friendlyOccupied = prev.units.some((unit) => unit.id !== activeUnit?.id && idFor(unit.pos) === tileId);
       const moveCosts = activeUnit ? movementRange(activeUnit.pos, activeUnit.moves, blockers, prev.discovered) : new Map<string, number>();
@@ -1668,9 +2309,9 @@ export default function Home() {
         message: !known
           ? "这片区域仍在战争迷雾中；请派单位靠近后侦察。"
           : cityBlocked
-            ? `${clickedRival!.capitalName}由${clickedRival!.name}控制；可在外交面板查看议程与总产出。`
+            ? `${clickedRival!.capitalName}由${clickedRival!.name}控制；${prev.wars[clickedRival!.id] === "war" ? `城防 ${prev.rivalCityHp[clickedRival!.id]}/${CITY_MAX_HP}` : "可在外交面板宣战或交涉"}。`
             : rivalOccupied
-              ? visibleTiles.has(tileId) ? `${occupiedByPatrol!.rival.name}巡逻队正在此处，当前没有交战行动。` : "战争迷雾中有单位阻挡，移动中止。"
+              ? visibleTiles.has(tileId) ? `${occupiedByPatrol!.rival.name}战士正在此处，${prev.wars[occupiedByPatrol!.rival.id] === "war" ? "选中相邻战斗单位即可攻击" : "宣战后才可攻击"}。` : "战争迷雾中有单位阻挡，移动中止。"
               : friendlyOccupied
                 ? "己方单位已占用这块地。"
               : terrainBlocked ? `${TERRAIN_INFO[terrain].label}目前无法通行。` : `已查看${TERRAIN_INFO[terrain].label}地块。`,
@@ -1707,6 +2348,20 @@ export default function Home() {
     });
   };
 
+  const handleFoundCity = () => {
+    if (!selectedUnit || selectedUnit.type !== "settler" || aiThinking || game.result) return;
+    const error = settlementError(game, selectedUnit.pos, selectedUnit.id);
+    if (error) {
+      setGame((prev) => ({ ...prev, message: `无法建城：${error}。` }));
+      return;
+    }
+    const newCityId = `city-${game.nextCitySerial}`;
+    setGame((prev) => foundCity(prev, selectedUnit.id));
+    setManagingCityId(newCityId);
+    setProductionCategory("buildings");
+    setProductionDrawerOpen(true);
+  };
+
   const chooseTech = (techId: TechId) => {
     setGame((prev) => ({
       ...prev,
@@ -1718,15 +2373,15 @@ export default function Home() {
 
   const chooseProduction = (productionId: ProductionId) => {
     const item = PRODUCTIONS.find((production) => production.id === productionId);
-    if (!item || aiThinking || game.result || (item.kind === "building" && game.completedBuildings.includes(item.id))) return;
+    if (!item || aiThinking || game.result || (item.kind === "building" && managingCity.completedBuildings.includes(item.id))) return;
     if (item.kind === "unit") {
       setGame((prev) => ({
         ...prev,
-        activeProduction: item.id,
-        selectedTile: idFor(CITY_POS),
+        cities: prev.cities.map((city) => city.id === managingCity.id ? { ...city, activeProduction: item.id } : city),
+        selectedTile: idFor(managingCity.pos),
         selectedUnitId: null,
-        message: `${item.name}已加入首都生产队列；完成后会自动部署到城市中心或相邻空格。`,
-        log: addLog(prev.log, `布宜诺斯艾利斯开始训练${item.name}。`),
+        message: `${item.name}已加入${managingCity.name}生产队列；完成后会自动部署到城市中心或相邻空格。`,
+        log: addLog(prev.log, `${managingCity.name}开始训练${item.name}。`),
       }));
       setProductionDrawerOpen(false);
       setPlacingProduction(null);
@@ -1735,15 +2390,15 @@ export default function Home() {
       setProductionReminderBypassed(false);
       return;
     }
-    const existingPlacement = game.buildingPlacements[item.id];
+    const existingPlacement = managingCity.buildingPlacements[item.id];
     if (existingPlacement) {
       setGame((prev) => ({
         ...prev,
-        activeProduction: item.id,
+        cities: prev.cities.map((city) => city.id === managingCity.id ? { ...city, activeProduction: item.id } : city),
         selectedTile: existingPlacement,
         selectedUnitId: null,
         message: `继续建造${item.name}，已有进度会保留。`,
-        log: addLog(prev.log, `布宜诺斯艾利斯继续建造${item.name}。`),
+        log: addLog(prev.log, `${managingCity.name}继续建造${item.name}。`),
       }));
       setProductionDrawerOpen(false);
       setPlacingProduction(null);
@@ -1756,7 +2411,7 @@ export default function Home() {
       setPlacementDetailed(false);
       setGame((prev) => ({
         ...prev,
-        selectedTile: idFor(CITY_POS),
+        selectedTile: idFor(managingCity.pos),
         selectedUnitId: null,
         message: `请在地图上为${item.name}选择一个绿色六角格。`,
       }));
@@ -1768,7 +2423,7 @@ export default function Home() {
     if (!placingProduction || !placementCandidate) return;
     const item = PRODUCTIONS.find((production) => production.id === placingProduction)!;
     const pos = posForId(placementCandidate);
-    const placementError = productionPlacementError(game, placingProduction, pos);
+    const placementError = productionPlacementError(game, managingCity.id, placingProduction, pos);
     if (placementError) {
       setGame((prev) => ({ ...prev, message: `不能在这里建造：${placementError}。` }));
       return;
@@ -1777,14 +2432,16 @@ export default function Home() {
     const productionId = placingProduction;
     const tileId = placementCandidate;
     setGame((prev) => {
-      const buildingPlacements = { ...prev.buildingPlacements, [productionId]: tileId };
-      const ownedTiles = territoryFromDeveloped([idFor(CITY_POS), ...prev.ruralTiles, ...Object.values(buildingPlacements).filter((placedTile): placedTile is string => Boolean(placedTile))]);
+      const city = cityById(prev, managingCity.id);
+      if (!city) return prev;
+      const buildingPlacements = { ...city.buildingPlacements, [productionId]: tileId };
+      const cities = prev.cities.map((candidate) => candidate.id === city.id ? { ...candidate, activeProduction: productionId, buildingPlacements } : candidate);
+      const ownedTiles = playerOwnedTilesForCities(cities);
       const borderGain = ownedTiles.filter((ownedTile) => !prev.ownedTiles.includes(ownedTile)).length;
       const message = `${item.name}已落位并形成城区，边界${borderGain > 0 ? `外推 ${borderGain} 格` : "保持紧凑"}；相邻加成 +${adjacency} ${YIELD_META[item.yield].label}。`;
       return {
         ...prev,
-        activeProduction: productionId,
-        buildingPlacements,
+        cities,
         ownedTiles,
         discovered: reveal(prev.discovered, pos, 1),
         selectedTile: tileId,
@@ -1826,7 +2483,8 @@ export default function Home() {
     }));
   };
 
-  const endTurn = useCallback(() => {
+  /* v5 single-city turn resolver retained only as migration history.
+  const endTurnV5 = useCallback(() => {
     if (aiLockRef.current || game.result || game.celebrationPending || game.growthPending > 0) return;
     const plans = rivalTurnPlansFor({ turn: game.turn, ownedTiles: game.ownedTiles });
     const runId = aiRunIdRef.current + 1;
@@ -2043,6 +2701,45 @@ export default function Home() {
 
     runAiPhase(0);
   }, [game.celebrationPending, game.growthPending, game.ownedTiles, game.result, game.turn]);
+  */
+
+  const endTurn = useCallback(() => {
+    if (aiLockRef.current || game.result || game.celebrationPending || game.cities.some((city) => city.growthPending > 0)) return;
+    const plans = rivalTurnPlansFor({ turn: game.turn, ownedTiles: game.ownedTiles });
+    const runId = aiRunIdRef.current + 1;
+    aiRunIdRef.current = runId;
+    aiLockRef.current = true;
+    setAiThinking(true);
+    setAiTurnPlan(plans);
+
+    const runAiPhase = (index: number) => {
+      if (aiRunIdRef.current !== runId) return;
+      const plan = plans[index];
+      const rival = RIVAL_BY_ID[plan.rivalId];
+      setAiPhaseIndex(index);
+      setGame((prev) => {
+        if (prev.defeatedRivals.includes(rival.id)) return { ...prev, message: `电脑回合 ${index + 1}/${plans.length}：${rival.name}已退出曙光时代。` };
+        const afterMilitary = advanceRivalMilitaryPhase(prev, rival.id);
+        const afterProduction = advanceRivalProduction(afterMilitary, rival.id);
+        return { ...afterProduction, message: `电脑回合 ${index + 1}/${plans.length}：${rival.name} · ${afterProduction.message}` };
+      });
+      aiTimerRef.current = setTimeout(() => {
+        if (aiRunIdRef.current !== runId) return;
+        aiTimerRef.current = null;
+        if (index < plans.length - 1) {
+          runAiPhase(index + 1);
+          return;
+        }
+        setGame((prev) => prev.result ? prev : resolvePlayerEconomyRound(prev));
+        aiLockRef.current = false;
+        setAiThinking(false);
+        setAiPhaseIndex(null);
+        setAiTurnPlan([]);
+      }, AI_STEP_MS);
+    };
+
+    runAiPhase(0);
+  }, [game.celebrationPending, game.cities, game.ownedTiles, game.result, game.turn]);
 
   const requestEndTurn = useCallback(() => {
     if (aiThinking || game.result || techPickerOpen || productionDrawerOpen || strategyDrawerOpen || growthDrawerOpen || placingProduction) return;
@@ -2050,9 +2747,11 @@ export default function Home() {
       setGame((prev) => ({ ...prev, message: "请先完成右侧的文明故事选择。" }));
       return;
     }
-    if (game.growthPending > 0) {
+    const growthCity = game.cities.find((city) => city.growthPending > 0);
+    if (growthCity) {
+      setManagingCityId(growthCity.id);
       setGrowthCandidate(null); setHoveredGrowthTile(null); setGrowthDrawerOpen(true);
-      setGame((prev) => ({ ...prev, selectedUnitId: null, selectedTile: idFor(CITY_POS), message: "请先选择新人口要开发的地块。" }));
+      setGame((prev) => ({ ...prev, selectedUnitId: null, selectedTile: idFor(growthCity.pos), message: `请先选择${growthCity.name}新人口要开发的地块。` }));
       return;
     }
     if (game.celebrationPending) {
@@ -2061,28 +2760,30 @@ export default function Home() {
       setGame((prev) => ({ ...prev, message: "幸福度已满，请先选择本次城市庆典。" }));
       return;
     }
-    if (!game.activeProduction && !productionReminderBypassed) {
+    const idleCity = game.cities.find((city) => !city.activeProduction);
+    if (idleCity && !productionReminderBypassed) {
+      setManagingCityId(idleCity.id);
       setGame((prev) => ({
         ...prev,
-        selectedTile: idFor(CITY_POS),
+        selectedTile: idFor(idleCity.pos),
         selectedUnitId: null,
-        message: "请先为布宜诺斯艾利斯安排生产，或选择本回合暂不生产。",
+        message: `请先为${idleCity.name}安排生产，或选择本回合暂不生产。`,
       }));
       setProductionDrawerOpen(true);
       return;
     }
     setProductionReminderBypassed(false);
     endTurn();
-  }, [aiThinking, endTurn, game.activeProduction, game.celebrationPending, game.growthPending, game.pendingEvent, game.result, growthDrawerOpen, placingProduction, productionDrawerOpen, productionReminderBypassed, strategyDrawerOpen, techPickerOpen]);
+  }, [aiThinking, endTurn, game.celebrationPending, game.cities, game.pendingEvent, game.result, growthDrawerOpen, placingProduction, productionDrawerOpen, productionReminderBypassed, strategyDrawerOpen, techPickerOpen]);
 
   useEffect(() => {
-    if (game.growthPending <= 0 || aiThinking || game.result) return;
-    const timer = window.setTimeout(() => { setProductionDrawerOpen(false); setStrategyDrawerOpen(false); setGrowthCandidate(null); setHoveredGrowthTile(null); setGrowthDrawerOpen(true); }, 0);
+    if (!pendingGrowthCity || aiThinking || game.result) return;
+    const timer = window.setTimeout(() => { setManagingCityId(pendingGrowthCity.id); setProductionDrawerOpen(false); setStrategyDrawerOpen(false); setGrowthCandidate(null); setHoveredGrowthTile(null); setGrowthDrawerOpen(true); }, 0);
     return () => window.clearTimeout(timer);
-  }, [aiThinking, game.growthPending, game.result]);
+  }, [aiThinking, game.result, pendingGrowthCity]);
 
   useEffect(() => {
-    if (aiThinking || game.result || game.pendingEvent || game.growthPending > 0 || game.celebrationPending || game.turn < game.nextEventTurn) return;
+    if (aiThinking || game.result || game.pendingEvent || totalGrowthPending > 0 || game.celebrationPending || game.turn < game.nextEventTurn) return;
     const nextEvent = (Object.keys(NARRATIVE_EVENTS) as NarrativeEventId[]).find((eventId) => !game.triggeredEvents.includes(eventId) && NARRATIVE_EVENTS[eventId].trigger(game));
     if (!nextEvent) return;
     const timer = window.setTimeout(() => {
@@ -2090,7 +2791,7 @@ export default function Home() {
       setGame((prev) => prev.pendingEvent ? prev : { ...prev, pendingEvent: nextEvent, triggeredEvents: [...prev.triggeredEvents, nextEvent], selectedUnitId: null, message: `文明故事：${NARRATIVE_EVENTS[nextEvent].title}` });
     }, 0);
     return () => window.clearTimeout(timer);
-  }, [aiThinking, game, game.celebrationPending, game.growthPending, game.nextEventTurn, game.pendingEvent, game.result, game.triggeredEvents]);
+  }, [aiThinking, game, game.celebrationPending, game.nextEventTurn, game.pendingEvent, game.result, game.triggeredEvents, totalGrowthPending]);
 
   useEffect(() => {
     if (!readyLegacyMilestone || aiThinking || game.result) return;
@@ -2116,7 +2817,7 @@ export default function Home() {
     const timer = window.setTimeout(() => setGame((prev) => {
       if (prev.result || !hasWonDawn(prev)) return prev;
       const message = "文明曙光胜利：四条遗产路径均已奠基，梅西与繁荣的首都共同开启新时代。";
-      return { ...prev, result: "win", message, log: addLog(prev.log, message) };
+      return { ...prev, result: "win", resultReason: "legacy", message, log: addLog(prev.log, message) };
     }), 0);
     return () => window.clearTimeout(timer);
   }, [game.result, victoryReady]);
@@ -2184,6 +2885,7 @@ export default function Home() {
   const resetGame = () => {
     stopTransientFlow();
     setSelectedRivalId("brazil");
+    setManagingCityId("city-1");
     setGame(createInitialState());
     setSaveNotice(saveMeta ? "已重新开始；原临时存档仍可读取" : "已重新开始新游戏");
     requestAnimationFrame(() => focusMapOn(CITY_POS, "auto"));
@@ -2222,7 +2924,9 @@ export default function Home() {
     }
     stopTransientFlow();
     const savedRival = saved.game.selectedTile ? rivalCapitalAt(posForId(saved.game.selectedTile)) : null;
+    const savedCity = saved.game.selectedTile ? playerCityAt(saved.game, posForId(saved.game.selectedTile)) : null;
     setSelectedRivalId(savedRival?.id ?? "brazil");
+    setManagingCityId(savedCity?.id ?? capitalCity(saved.game)?.id ?? "city-1");
     setGame({ ...saved.game, message: `已读取第 ${saved.game.turn} 回合的临时存档。` });
     setSaveMeta({ savedAt: saved.savedAt, turn: saved.game.turn });
     setSaveNotice(`已恢复第 ${saved.game.turn} 回合`);
@@ -2239,13 +2943,14 @@ export default function Home() {
   const techPercent = activeTech ? Math.min(100, (game.techProgress / activeTech.cost) * 100) : 0;
   const civicPercent = activeCivic ? Math.min(100, (game.civicProgress / activeCivic.cost) * 100) : 0;
   const productionPercent = activeProduction ? Math.min(100, activeProductionProgress / activeProduction.cost * 100) : 0;
-  const cityGrowthTarget = 10 + game.population * 4;
+  const cityGrowthTarget = 10 + managingCity.population * 4;
   const sciencePerTurn = cityYields.science + (game.tradeRouteTurns > 0 ? 1 : 0) + (game.researchCollaborationTurns > 0 ? 2 : 0);
   const culturePerTurn = cityYields.culture;
   const goldPerTurn = cityYields.gold + (game.tradeRouteTurns > 0 ? 4 : 0);
-  const cityTileLeft = CITY_POS.col * 70;
-  const cityTileTop = CITY_POS.row * 82 + (CITY_POS.col % 2) * 41;
-  const cityStyle = { left: cityTileLeft - 39, top: cityTileTop + 57 };
+  const capital = capitalCity(game) ?? managingCity;
+  const cityTileLeft = capital.pos.col * 70;
+  const cityTileTop = capital.pos.row * 82 + (capital.pos.col % 2) * 41;
+  const playerCityStyle = (city: PlayerCity) => ({ left: city.pos.col * 70 - 39, top: city.pos.row * 82 + (city.pos.col % 2) * 41 + 57 });
   const rivalCityStyle = (rival: RivalDefinition) => ({ left: rival.capital.col * 70 - 31, top: rival.capital.row * 82 + (rival.capital.col % 2) * 41 + 55 });
   const messiStyle = { left: cityTileLeft + 67, top: cityTileTop + 18 };
   const miniCityGeometry = hexGeometry(CITY_POS);
@@ -2253,19 +2958,23 @@ export default function Home() {
   const activeTradeRoutePath = game.tradePartner ? (() => { const start = hexGeometry(CITY_POS); const end = hexGeometry(RIVAL_BY_ID[game.tradePartner].capital); return `M ${start.cx} ${start.cy} C ${start.cx + (end.cx - start.cx) * .34} ${start.cy - 150}, ${start.cx + (end.cx - start.cx) * .68} ${end.cy + 150}, ${end.cx} ${end.cy}`; })() : null;
   const activeNarrativeEvent = game.pendingEvent ? NARRATIVE_EVENTS[game.pendingEvent] : null;
   const savedAtLabel = saveMeta ? formatSaveTime(saveMeta.savedAt) : "暂无临时存档";
-  const pendingDecision = game.growthPending > 0
-    ? { kind: "growth" as const, label: "选择新人口地块", detail: `${game.growthPending} 次成长待分配` }
+  const idleProductionCity = game.cities.find((city) => !city.activeProduction) ?? null;
+  const pendingDecision = totalGrowthPending > 0
+    ? { kind: "growth" as const, label: "选择新人口地块", detail: `${totalGrowthPending} 次成长待分配` }
     : game.celebrationPending ? { kind: "celebration" as const, label: "选择城市庆典", detail: "幸福度已满" }
       : !game.activeTech && TECHS.some((tech) => !game.completedTechs.includes(tech.id)) ? { kind: "tech" as const, label: "选择下一项科技", detail: "科研点会保留" }
         : !game.activeCivic && CIVICS.some((civic) => !game.completedCivics.includes(civic.id)) ? { kind: "civic" as const, label: "选择下一项市政", detail: "文化点会保留" }
-          : !game.activeProduction ? { kind: "production" as const, label: "安排首都生产", detail: "建筑或单位" } : null;
+          : idleProductionCity ? { kind: "production" as const, label: `安排${idleProductionCity.name}生产`, detail: "建筑、单位或开拓者" } : null;
   const handlePrimaryDecision = () => {
     if (!pendingDecision) return;
-    if (pendingDecision.kind === "growth") openGrowth();
+    if (pendingDecision.kind === "growth") {
+      if (pendingGrowthCity) setManagingCityId(pendingGrowthCity.id);
+      openGrowth();
+    }
     if (pendingDecision.kind === "celebration") openStrategy("happiness");
     if (pendingDecision.kind === "tech") { closeProductionDrawer(); setStrategyDrawerOpen(false); setGrowthDrawerOpen(false); setTechPickerOpen(true); }
     if (pendingDecision.kind === "civic") openStrategy("civics");
-    if (pendingDecision.kind === "production") openCapitalProduction();
+    if (pendingDecision.kind === "production" && idleProductionCity) openCapitalProduction(idleProductionCity.id);
   };
 
   const tiles = MAP_TILES;
@@ -2307,7 +3016,7 @@ export default function Home() {
               <div><strong>{game.techProgress}</strong><span>/ {activeTech?.cost ?? "—"}</span></div>
             </div>
             <div className="progress-copy"><span>预计完成</span><strong>{activeTech ? `${Math.max(1, Math.ceil((activeTech.cost - game.techProgress) / Math.max(1, sciencePerTurn)))} 回合` : "等待选择"}</strong></div>
-            <button className="tech-change" onClick={() => { closeProductionDrawer(); setStrategyDrawerOpen(false); setGrowthDrawerOpen(false); setTechPickerOpen(true); }} disabled={aiThinking || game.growthPending > 0} data-testid="open-tech-picker">{activeTech ? "更换研究" : "选择下一项研究"}</button>
+            <button className="tech-change" onClick={() => { closeProductionDrawer(); setStrategyDrawerOpen(false); setGrowthDrawerOpen(false); setTechPickerOpen(true); }} disabled={aiThinking || totalGrowthPending > 0} data-testid="open-tech-picker">{activeTech ? "更换研究" : "选择下一项研究"}</button>
           </section>
 
           <section className="paper-card civic-compact-card">
@@ -2378,11 +3087,11 @@ export default function Home() {
           <div ref={mapBoardRef} className={`hex-board ${placingProduction ? "placement-mode" : ""}`} style={{ width: BOARD_WIDTH, height: BOARD_HEIGHT }} role="grid" aria-label={placingItem ? `为${placingItem.name}选择建设地块` : "潘帕斯六角格地图"}>
             <svg className="territory-layer territory-fill-layer" viewBox={`0 0 ${BOARD_WIDTH} ${BOARD_HEIGHT}`} aria-hidden="true">
               <g>{tiles.filter((tile) => isArgentineTerritory(game, tile)).map((tile) => { const tileId = idFor(tile); return <polygon key={`argentina-fill-${tileId}`} points={hexGeometry(tile).points} className={`territory-fill argentina ${playerDevelopedTiles.has(tileId) ? "developed" : "fringe"}`} />; })}</g>
-              {RIVALS.map((rival) => { const developed = new Set([idFor(rival.capital), ...rivalEmpires[rival.id].developedTiles]); return <g key={`territory-${rival.id}`}>{rivalEmpires[rival.id].ownedTiles.map((tileId) => { const tile = posForId(tileId); return <polygon key={`${rival.id}-fill-${tileId}`} points={hexGeometry(tile).points} className={`territory-fill foreign ${developed.has(tileId) ? "developed" : "fringe"}`} style={{ fill: `${rival.color}${developed.has(tileId) ? "55" : "24"}` }} />; })}</g>; })}
+              {RIVALS.filter((rival) => !game.defeatedRivals.includes(rival.id)).map((rival) => { const developed = new Set([idFor(rival.capital), ...rivalEmpires[rival.id].developedTiles]); return <g key={`territory-${rival.id}`}>{rivalEmpires[rival.id].ownedTiles.map((tileId) => { const tile = posForId(tileId); return <polygon key={`${rival.id}-fill-${tileId}`} points={hexGeometry(tile).points} className={`territory-fill foreign ${developed.has(tileId) ? "developed" : "fringe"}`} style={{ fill: `${rival.color}${developed.has(tileId) ? "55" : "24"}` }} />; })}</g>; })}
             </svg>
             <svg className="territory-layer territory-edge-layer" viewBox={`0 0 ${BOARD_WIDTH} ${BOARD_HEIGHT}`} aria-hidden="true">
               <path d={argentinaEdgePath} className="territory-edge argentina" />
-              {RIVALS.map((rival) => <path key={`edge-${rival.id}`} d={rivalEdgePaths[rival.id]} className="territory-edge foreign" style={{ stroke: rival.color }} />)}
+              {RIVALS.filter((rival) => !game.defeatedRivals.includes(rival.id)).map((rival) => <path key={`edge-${rival.id}`} d={rivalEdgePaths[rival.id]} className="territory-edge foreign" style={{ stroke: rival.color }} />)}
             </svg>
             {game.tradeRouteTurns > 0 && activeTradeRoutePath && <svg className="trade-route-layer" viewBox={`0 0 ${BOARD_WIDTH} ${BOARD_HEIGHT}`} aria-hidden="true"><path d={activeTradeRoutePath} className="trade-route-shadow" /><path d={activeTradeRoutePath} className="trade-route" /></svg>}
             {tiles.map(({ terrain, col, row }) => {
@@ -2401,13 +3110,14 @@ export default function Home() {
               const improvement = improvementAt(game, tileId);
               const resourceId = RESOURCE_TILES[tileId] ?? null;
               const resource = resourceId ? RESOURCE_INFO[resourceId] : null;
-              const placedProductionId = placedProductionByTile.get(tileId) ?? null;
+              const placedInfo = placedProductionByTile.get(tileId) ?? null;
+              const placedProductionId = placedInfo?.buildingId ?? null;
               const placedProduction = PRODUCTIONS.find((item): item is BuildingProject => item.id === placedProductionId && item.kind === "building") ?? null;
-              const buildingCompleted = placedProductionId ? game.completedBuildings.includes(placedProductionId) : false;
+              const buildingCompleted = placedInfo ? Boolean(cityById(game, placedInfo.cityId)?.completedBuildings.includes(placedInfo.buildingId)) : false;
               const buildingUnderConstruction = Boolean(placedProduction && !buildingCompleted);
               const placementOption = placementOptions.get(tileId) ?? null;
               const placementValid = Boolean(placingItem && placementOption && !placementOption.error);
-              const placementInvalid = Boolean(placingItem && placementOption?.error && discovered && owned && CITY_MAX_BUILDABLE_IDS.has(tileId));
+              const placementInvalid = Boolean(placingItem && placementOption?.error && discovered && owned && hexDistance(pos, managingCity.pos) <= 3);
               const placementCandidateSelected = placementCandidate === tileId;
               const placementFeatured = placementValid && placementOption!.adjacency === bestPlacementAdjacency && bestPlacementAdjacency > 0;
               const tileYield = yieldsFor(pos);
@@ -2415,7 +3125,8 @@ export default function Home() {
               const growthValid = Boolean(growthChoosing && growthOption);
               const growthCandidateSelected = growthCandidate === tileId;
               const growthDim = growthChoosing && !growthValid;
-              const ruralDeveloped = game.ruralTiles.includes(tileId);
+              const ruralDeveloped = allRuralTiles(game).includes(tileId);
+              const attackable = attackTargets.has(tileId);
               const displayYield = growthValid ? growthOption!.after : tileYield;
               const friendlyUnit = game.units.find((unit) => tileId === idFor(unit.pos));
               const foreignPatrol = visibleRivalPatrols.find((patrol) => tileId === idFor(patrol.pos)) ?? null;
@@ -2429,7 +3140,7 @@ export default function Home() {
                 : "";
               return (
                 <button
-                  className={`hex-tile ${terrain} ${owned ? "owned" : ""} ${playerDevelopedTiles.has(tileId) ? "player-developed-core" : ""} ${rival ? "rival" : ""} ${foreignImprovement ? "foreign-developed" : ""} ${discovered ? visible ? "visible" : "surveyed" : "fog"} ${reachable ? "reachable" : ""} ${selected && !placingProduction && !growthChoosing ? "selected" : ""} ${game.footballTurns > 0 && discovered && owned ? "football-benefit" : ""} ${placedProduction ? "has-city-building" : ""} ${buildingUnderConstruction ? "construction-site" : ""} ${placementValid ? "placement-valid" : ""} ${placementInvalid ? "placement-invalid" : ""} ${placingItem && !placementValid && !placementInvalid ? "placement-dim" : ""} ${placementCandidateSelected ? "placement-candidate" : ""} ${growthChoosing ? "growth-mode" : ""} ${growthValid ? "growth-valid" : ""} ${growthDim ? "growth-dim" : ""} ${growthCandidateSelected ? "growth-candidate-selected" : ""} ${ruralDeveloped ? "rural-developed" : ""} ${newlyClaimedTile === tileId ? "newly-claimed" : ""}`}
+                  className={`hex-tile ${terrain} ${owned ? "owned" : ""} ${playerDevelopedTiles.has(tileId) ? "player-developed-core" : ""} ${rival ? "rival" : ""} ${foreignImprovement ? "foreign-developed" : ""} ${discovered ? visible ? "visible" : "surveyed" : "fog"} ${reachable ? "reachable" : ""} ${attackable ? "attackable" : ""} ${selected && !placingProduction && !growthChoosing ? "selected" : ""} ${game.footballTurns > 0 && discovered && owned ? "football-benefit" : ""} ${placedProduction ? "has-city-building" : ""} ${buildingUnderConstruction ? "construction-site" : ""} ${placementValid ? "placement-valid" : ""} ${placementInvalid ? "placement-invalid" : ""} ${placingItem && !placementValid && !placementInvalid ? "placement-dim" : ""} ${placementCandidateSelected ? "placement-candidate" : ""} ${growthChoosing ? "growth-mode" : ""} ${growthValid ? "growth-valid" : ""} ${growthDim ? "growth-dim" : ""} ${growthCandidateSelected ? "growth-candidate-selected" : ""} ${ruralDeveloped ? "rural-developed" : ""} ${newlyClaimedTile === tileId ? "newly-claimed" : ""}`}
                   key={tileId}
                   style={{ left: col * 70, top: row * 82 + (col % 2) * 41 }}
                   aria-label={`${discovered ? tileName : "未知"}地块，第 ${row + 1} 行第 ${col + 1} 列${yieldLabel}${containsUnit}${reachable ? `，可以移动，需要 ${moveCost} 点移动力` : ""}${placementLabel}`}
@@ -2466,6 +3177,7 @@ export default function Home() {
                     </span>
                   )}
                   {reachable && <span className="move-overlay" aria-hidden="true"><svg className="hex-ring" viewBox="0 0 100 100" preserveAspectRatio="none"><polygon points="25,2 75,2 98,50 75,98 25,98 2,50" /></svg><i /><b>{moveCost}</b></span>}
+                  {attackable && <span className="attack-overlay" aria-hidden="true"><svg className="hex-ring" viewBox="0 0 100 100" preserveAspectRatio="none"><polygon points="25,2 75,2 98,50 75,98 25,98 2,50" /></svg><b>⚔</b><small>攻击</small></span>}
                   {placementValid && placingItem && <span className={`placement-overlay ${placementFeatured ? "featured" : ""} ${placementCandidateSelected ? "candidate" : ""}`} aria-hidden="true"><svg className="hex-ring" viewBox="0 0 100 100" preserveAspectRatio="none"><polygon points="25,2 75,2 98,50 75,98 25,98 2,50" /></svg><b>{placementCandidateSelected ? "✓" : `+${2 + placementOption!.adjacency}${YIELD_META[placingItem.yield].symbol}`}</b><small>{placementCandidateSelected ? "已选择" : placementFeatured ? "高收益" : "可建造"}</small></span>}
                   {placementInvalid && <span className="placement-invalid-mark" aria-hidden="true">×</span>}
                   {growthValid && growthOption && <span className={`growth-overlay ${growthCandidateSelected ? "candidate" : ""}`} aria-hidden="true"><svg className="hex-ring" viewBox="0 0 100 100" preserveAspectRatio="none"><polygon points="25,2 75,2 98,50 75,98 25,98 2,50" /></svg><b>{growthCandidateSelected ? "✓" : "+1"}</b><small>{growthCandidateSelected ? "已选择" : growthOption.expands ? "扩张" : "开发"}</small></span>}
@@ -2475,35 +3187,41 @@ export default function Home() {
               );
             })}
 
-            <button className={`map-piece capital-piece ${citySelected ? "capital-selected" : ""} ${placingProduction || growthChoosing ? "placement-locked" : ""}`} style={cityStyle} aria-label={`布宜诺斯艾利斯，阿根廷首都，${game.population} 人口，${activeProduction ? `正在${activeProduction.kind === "unit" ? "训练" : "建造"}${activeProduction.name}，还需 ${productionTurnsRemaining} 回合` : "等待安排生产"}`} onClick={openCapitalProduction} data-testid="capital-city" disabled={aiThinking || Boolean(placingProduction || growthChoosing)}>
-              <span className="place-label"><b>★</b> 布宜诺斯艾利斯 <em>{game.population}</em><small className={activeProduction ? "building" : "idle"}>锤 {activeProduction ? `${activeProduction.name} · ${productionTurnsRemaining}` : "待生产"}</small></span>
-            </button>
+            {game.cities.map((city) => {
+              const project = PRODUCTIONS.find((item) => item.id === city.activeProduction) ?? null;
+              const cityProduction = Math.max(1, cityYieldTotalsFor(game, city.id).production);
+              const turns = project ? Math.max(1, Math.ceil((project.cost - city.productionProgress[project.id]) / cityProduction)) : null;
+              const selected = !selectedUnit && game.selectedTile === idFor(city.pos);
+              return <button key={city.id} className={`map-piece capital-piece ${city.isCapital ? "" : "secondary-city-piece"} ${selected ? "capital-selected" : ""} ${placingProduction || growthChoosing ? "placement-locked" : ""}`} style={playerCityStyle(city)} aria-label={`${city.name}，阿根廷${city.isCapital ? "首都" : "城市"}，${city.population} 人口，城防 ${city.hp}/${CITY_MAX_HP}`} onClick={() => openCapitalProduction(city.id)} data-testid={city.isCapital ? "capital-city" : `city-${city.id}`} disabled={aiThinking || Boolean(placingProduction || growthChoosing)}>
+                <span className="place-label"><b>{city.isCapital ? "★" : "●"}</b> {city.name} <em>{city.population}</em><small className={project ? "building" : "idle"}>锤 {project ? `${project.name} · ${turns}` : "待生产"}</small><i className="city-hp"><u style={{ width: `${city.hp / CITY_MAX_HP * 100}%` }} /></i></span>
+              </button>;
+            })}
 
-            {RIVALS.map((rival) => {
+            {RIVALS.filter((rival) => !game.defeatedRivals.includes(rival.id)).map((rival) => {
               const empire = rivalEmpires[rival.id];
               const yields = rivalYieldsFor(game, rival.id, empire);
               const population = empire.population;
               const selected = !selectedUnit && game.selectedTile === idFor(rival.capital);
-              return <button key={`capital-${rival.id}`} className={`map-piece capital-piece foreign-city-piece ${selected ? "capital-selected" : ""} ${activeAiRival?.id === rival.id ? "ai-active" : ""} ${placingProduction || growthChoosing ? "placement-locked" : ""}`} style={{ ...rivalCityStyle(rival), "--civ-color": rival.color, "--civ-tint": rival.tint } as CSSProperties} aria-label={`${rival.capitalName}，${rival.name}首都，${population} 人口；距离布宜诺斯艾利斯 ${hexDistance(CITY_POS, rival.capital)} 格；每回合食物 ${yields.food}，生产 ${yields.production}，科技 ${yields.science}，文化 ${yields.culture}`} onClick={() => { setSelectedRivalId(rival.id); setGame((prev) => ({ ...prev, selectedUnitId: null, selectedTile: idFor(rival.capital), message: `${rival.capitalName}：${rival.name}首都，领袖${rival.leader}，与布宜诺斯艾利斯相距 ${hexDistance(CITY_POS, rival.capital)} 格。` })); }} data-testid={`${rival.id}-city`} disabled={aiThinking || Boolean(placingProduction || growthChoosing)}>
-                <span className="place-label"><b>◆</b> {rival.capitalName} <em>{population}</em><small>{rival.flag} {rival.name} · 开发 {empire.development}</small></span>
+              return <button key={`capital-${rival.id}`} className={`map-piece capital-piece foreign-city-piece ${selected ? "capital-selected" : ""} ${activeAiRival?.id === rival.id ? "ai-active" : ""} ${placingProduction || growthChoosing ? "placement-locked" : ""}`} style={{ ...rivalCityStyle(rival), "--civ-color": rival.color, "--civ-tint": rival.tint } as CSSProperties} aria-label={`${rival.capitalName}，${rival.name}首都，${population} 人口，城防 ${game.rivalCityHp[rival.id]}/${CITY_MAX_HP}；每回合食物 ${yields.food}，生产 ${yields.production}，科技 ${yields.science}，文化 ${yields.culture}`} onClick={() => { setSelectedRivalId(rival.id); if (selectedUnit) handleTileClick(rival.capital); else setGame((prev) => ({ ...prev, selectedUnitId: null, selectedTile: idFor(rival.capital), message: `${rival.capitalName}：${rival.name}首都 · ${prev.wars[rival.id] === "war" ? `交战中，城防 ${prev.rivalCityHp[rival.id]}/${CITY_MAX_HP}` : "和平状态"}。` })); }} data-testid={`${rival.id}-city`} disabled={aiThinking || Boolean(placingProduction || growthChoosing)}>
+                <span className="place-label"><b>◆</b> {rival.capitalName} <em>{population}</em><small>{rival.flag} {rival.name} · {game.wars[rival.id] === "war" ? "交战" : `开发 ${empire.development}`}</small><i className="city-hp"><u style={{ width: `${game.rivalCityHp[rival.id] / CITY_MAX_HP * 100}%` }} /></i></span>
               </button>;
             })}
 
             {game.units.map((unit) => {
               const info = UNIT_INFO[unit.type];
-              const cityGarrison = idFor(unit.pos) === idFor(CITY_POS);
+              const cityGarrison = game.cities.some((city) => idFor(unit.pos) === idFor(city.pos));
               const unitStyle = { left: unit.pos.col * 70 + 22, top: unit.pos.row * 82 + (unit.pos.col % 2) * 41 + (cityGarrison ? 5 : 15) };
-              return <button key={unit.id} className={`map-piece unit-piece trained-unit-piece ${unit.type}-piece ${cityGarrison ? "city-garrison" : ""} ${game.selectedUnitId === unit.id ? "piece-selected" : ""} ${placingProduction || growthChoosing ? "placement-locked" : ""}`} style={unitStyle} aria-label={`${info.name}，${unit.moves} 点移动力`} data-testid={unit.id === "gaucho-1" ? "gaucho-unit" : `unit-${unit.id}`} onClick={() => { setStrategyDrawerOpen(false); setGrowthDrawerOpen(false); setGame((prev) => ({ ...prev, selectedUnitId: unit.id, selectedTile: idFor(unit.pos), message: `${info.name}已选择；绿色六角格是本回合可达范围。` })); }} disabled={aiThinking || Boolean(placingProduction || growthChoosing)}>
-                <span className={`unit-token ${unit.type}`} aria-hidden="true"><b>{info.short}</b><small>{unit.moves}</small></span>
+              return <button key={unit.id} className={`map-piece unit-piece trained-unit-piece ${unit.type}-piece ${cityGarrison ? "city-garrison" : ""} ${game.selectedUnitId === unit.id ? "piece-selected" : ""} ${placingProduction || growthChoosing ? "placement-locked" : ""}`} style={unitStyle} aria-label={`${info.name}，${unit.moves} 点移动力，${unit.hp} 生命`} data-testid={unit.id === "gaucho-1" ? "gaucho-unit" : `unit-${unit.id}`} onClick={() => { setStrategyDrawerOpen(false); setGrowthDrawerOpen(false); setGame((prev) => ({ ...prev, selectedUnitId: unit.id, selectedTile: idFor(unit.pos), message: `${info.name}已选择；${unit.type === "settler" ? "可在合法陆地建立分城" : "绿色格可移动，红色格可攻击"}。` })); }} disabled={aiThinking || Boolean(placingProduction || growthChoosing)}>
+                <span className={`unit-token ${unit.type}`} aria-hidden="true"><b>{info.short}</b><small>{unit.moves}</small><i><u style={{ width: `${unit.hp}%` }} /></i></span>
                 <span className="unit-label">{info.name}</span>
               </button>;
             })}
 
-            {visibleRivalPatrols.map(({ rival, pos }) => {
+            {visibleRivalPatrols.map(({ id, rival, pos, hp }) => {
               const patrolStyle = { left: pos.col * 70 + 22, top: pos.row * 82 + (pos.col % 2) * 41 + 15, "--civ-color": rival.color } as CSSProperties;
-              return <button key={`patrol-${rival.id}`} className={`map-piece rival-piece ${activeAiRival?.id === rival.id ? "ai-active" : ""} ${placingProduction || growthChoosing ? "placement-locked" : ""}`} style={patrolStyle} aria-label={`${rival.name}巡逻队`} onClick={() => { setSelectedRivalId(rival.id); setGame((prev) => ({ ...prev, selectedUnitId: null, selectedTile: idFor(pos), message: `${rival.name}巡逻队：目前保持中立，可通过外交改善往来。` })); }} disabled={aiThinking || Boolean(placingProduction || growthChoosing)}>
-                <span className="unit-token" aria-hidden="true"><b>{rival.token}</b></span>
-                <span className="unit-label">{rival.name}巡逻队</span>
+              return <button key={id} className={`map-piece rival-piece ${game.wars[rival.id] === "war" ? "at-war" : ""} ${activeAiRival?.id === rival.id ? "ai-active" : ""} ${placingProduction || growthChoosing ? "placement-locked" : ""}`} style={patrolStyle} aria-label={`${rival.name}战士，${hp} 生命`} onClick={() => { setSelectedRivalId(rival.id); if (selectedUnit) handleTileClick(pos); else setGame((prev) => ({ ...prev, selectedUnitId: null, selectedTile: idFor(pos), message: `${rival.name}战士 · ${hp}/${UNIT_MAX_HP} HP · ${prev.wars[rival.id] === "war" ? "交战中" : "和平状态"}。` })); }} disabled={aiThinking || Boolean(placingProduction || growthChoosing)}>
+                <span className="unit-token" aria-hidden="true"><b>{rival.token}</b><i><u style={{ width: `${hp}%` }} /></i></span>
+                <span className="unit-label">{rival.name}战士</span>
               </button>;
             })}
 
@@ -2526,7 +3244,7 @@ export default function Home() {
               <span className="ai-turn-copy">
                 <small className="ai-turn-kicker">电脑回合 {Number(aiPhaseIndex) + 1} / {RIVALS.length}</small>
                 <strong className="ai-turn-civ">{activeAiRival.name} · {activeAiRival.capitalName}</strong>
-                <span className="ai-turn-action">{activeAiPlan.action}</span>
+                <span className="ai-turn-action">{game.message}</span>
                 <span className="ai-turn-progress" aria-hidden="true">{RIVALS.map((rival, index) => <i key={`ai-progress-${rival.id}`} className={`ai-turn-dot ${index < Number(aiPhaseIndex) ? "done" : index === aiPhaseIndex ? "active" : ""}`} />)}</span>
               </span>
             </div>
@@ -2542,16 +3260,18 @@ export default function Home() {
             </div>
             <div className="trait"><span>太阳五月</span><b>草原文化 +1</b></div>
             <div className="trait"><span>潘帕斯牧场</span><b>骑乘单位 +1 移动</b></div>
-            <div className={`city-growth ${game.growthPending > 0 ? "growth-ready" : ""}`}><span>{game.growthPending > 0 ? "人口已增长" : "首都成长"}</span><b>{game.growthPending > 0 ? `${game.growthPending} 次待选择` : `${game.food}/${cityGrowthTarget} 食物`}</b><i><em style={{ width: `${game.growthPending > 0 ? 100 : Math.min(100, game.food / cityGrowthTarget * 100)}%` }} /></i></div>
+            <div className="core-loop-shortcuts" aria-label="核心玩法快捷入口"><button onClick={() => openCapitalProduction(managingCity.id, "units")} disabled={aiThinking || Boolean(game.result)} data-testid="shortcut-settler"><b>拓</b><span>训练开拓者<small>建立分城</small></span></button><button onClick={() => openStrategy("diplomacy")} disabled={aiThinking || Boolean(game.result)} data-testid="shortcut-war"><b>⚔</b><span>外交与宣战<small>开启战斗</small></span></button></div>
+            <div className="city-tabs" aria-label="城市列表">{game.cities.map((city) => <button key={city.id} className={city.id === managingCity.id ? "active" : ""} onClick={() => { setManagingCityId(city.id); setGame((prev) => ({ ...prev, selectedTile: idFor(city.pos), selectedUnitId: null, message: `正在管理${city.name}。` })); requestAnimationFrame(() => focusMapOn(city.pos)); }}><b>{city.isCapital ? "★" : "●"}</b><span>{city.name}</span><em>{city.population}</em></button>)}</div>
+            <div className={`city-growth ${managingCity.growthPending > 0 ? "growth-ready" : ""}`}><span>{managingCity.growthPending > 0 ? "人口已增长" : `${managingCity.name}成长`}</span><b>{managingCity.growthPending > 0 ? `${managingCity.growthPending} 次待选择` : `${managingCity.food}/${cityGrowthTarget} 食物`}</b><i><em style={{ width: `${managingCity.growthPending > 0 ? 100 : Math.min(100, managingCity.food / cityGrowthTarget * 100)}%` }} /></i></div>
             <div className="city-growth happiness-track"><span>城市幸福度</span><b>{game.happiness}/{HAPPINESS_TARGET} · +{happinessPerTurn}</b><i><em style={{ width: `${Math.min(100, game.happiness / HAPPINESS_TARGET * 100)}%` }} /></i></div>
-            <div className="city-management-actions"><button onClick={openGrowth} className={game.growthPending > 0 ? "attention" : ""} data-testid="manage-growth">{game.growthPending > 0 ? "选择成长地块！" : "城市成长"}</button><button onClick={() => openStrategy("happiness")} className={game.celebrationPending ? "attention" : ""} data-testid="open-happiness">{game.celebrationPending ? "选择庆典！" : "幸福与庆典"}</button></div>
+            <div className="city-management-actions"><button onClick={openGrowth} className={managingCity.growthPending > 0 ? "attention" : ""} data-testid="manage-growth">{managingCity.growthPending > 0 ? "选择成长地块！" : "城市成长"}</button><button onClick={() => openStrategy("happiness")} className={game.celebrationPending ? "attention" : ""} data-testid="open-happiness">{game.celebrationPending ? "选择庆典！" : "幸福与庆典"}</button></div>
             {developedResources.length > 0 && <div className="developed-resources"><small>已开发资源</small>{developedResources.map((resource, index) => <span key={`${resource.name}-${index}`}><b>{resource.icon}</b>{resource.name}</span>)}</div>}
-            <button className={`city-production-summary ${activeProduction ? "active" : "idle"}`} onClick={openCapitalProduction} disabled={aiThinking || Boolean(game.result) || game.growthPending > 0} data-testid="open-production-picker">
+            <button className={`city-production-summary ${activeProduction ? "active" : "idle"}`} onClick={() => openCapitalProduction()} disabled={aiThinking || Boolean(game.result) || managingCity.growthPending > 0} data-testid="open-production-picker">
               <span className="production-summary-icon" aria-hidden="true">⚒</span>
-              <span className="production-summary-copy"><small>首都生产 · +{productionPerTurn} 锤/回合</small><strong>{activeProduction?.name ?? (hasAvailableProduction ? "待安排生产" : "全部项目已完成")}</strong>{activeProduction && <i><em style={{ width: `${productionPercent}%` }} /></i>}</span>
+              <span className="production-summary-copy"><small>{managingCity.name} · +{productionPerTurn} 锤/回合</small><strong>{activeProduction?.name ?? (hasAvailableProduction ? "待安排生产" : "全部项目已完成")}</strong>{activeProduction && <i><em style={{ width: `${productionPercent}%` }} /></i>}</span>
               <b>{activeProduction ? `${productionTurnsRemaining} 回合` : hasAvailableProduction ? "安排 ›" : "完成 ✓"}</b>
             </button>
-            {game.completedBuildings.length > 0 && <div className="completed-buildings" aria-label="已建成建筑">{game.completedBuildings.map((id) => <span key={id}>{PRODUCTIONS.find((item) => item.id === id)?.name}</span>)}</div>}
+            {managingCity.completedBuildings.length > 0 && <div className="completed-buildings" aria-label="已建成建筑">{managingCity.completedBuildings.map((id) => <span key={id}>{PRODUCTIONS.find((item) => item.id === id)?.name}</span>)}</div>}
           </section>
 
           <section className="paper-card save-card" aria-label="本地临时存档">
@@ -2583,18 +3303,18 @@ export default function Home() {
                   return <polygon key={`mini-${tileId}`} points={geometry.points} className={`mini-hex mini-${terrain} ${discovered ? visibleTiles.has(tileId) ? "visible" : "surveyed" : "fog"}`} />;
                 })}
                 <path d={argentinaEdgePath} className="mini-territory-edge argentina" />
-                {RIVALS.map((rival) => <path key={`mini-edge-${rival.id}`} d={rivalEdgePaths[rival.id]} className="mini-territory-edge foreign" style={{ stroke: rival.color }} />)}
+                {RIVALS.filter((rival) => !game.defeatedRivals.includes(rival.id)).map((rival) => <path key={`mini-edge-${rival.id}`} d={rivalEdgePaths[rival.id]} className="mini-territory-edge foreign" style={{ stroke: rival.color }} />)}
                 {selectedMiniGeometry && <polygon points={selectedMiniGeometry.points} className="mini-selected" />}
-                <g className="mini-token mini-city-token" transform={`translate(${miniCityGeometry.cx} ${miniCityGeometry.cy})`}><circle r="29" /><text textAnchor="middle" dominantBaseline="central">★</text></g>
-                {RIVALS.map((rival) => { const geometry = hexGeometry(rival.capital); return <g key={`mini-capital-${rival.id}`} className={`mini-token mini-foreign-city-token ${activeAiRival?.id === rival.id ? "ai-active" : ""}`} transform={`translate(${geometry.cx} ${geometry.cy})`}><circle className="mini-rival-halo" r={selectedRivalId === rival.id || activeAiRival?.id === rival.id ? 38 : 0} style={{ stroke: rival.color }} /><circle r="27" style={{ fill: rival.color }} /><text textAnchor="middle" dominantBaseline="central">{rival.token}</text></g>; })}
+                {game.cities.map((city) => { const geometry = hexGeometry(city.pos); return <g key={`mini-city-${city.id}`} className="mini-token mini-city-token" transform={`translate(${geometry.cx} ${geometry.cy})`}><circle r={city.isCapital ? 29 : 24} /><text textAnchor="middle" dominantBaseline="central">{city.isCapital ? "★" : "●"}</text></g>; })}
+                {RIVALS.filter((rival) => !game.defeatedRivals.includes(rival.id)).map((rival) => { const geometry = hexGeometry(rival.capital); return <g key={`mini-capital-${rival.id}`} className={`mini-token mini-foreign-city-token ${activeAiRival?.id === rival.id ? "ai-active" : ""}`} transform={`translate(${geometry.cx} ${geometry.cy})`}><circle className="mini-rival-halo" r={selectedRivalId === rival.id || activeAiRival?.id === rival.id ? 38 : 0} style={{ stroke: rival.color }} /><circle r="27" style={{ fill: rival.color }} /><text textAnchor="middle" dominantBaseline="central">{rival.token}</text></g>; })}
                 {game.units.map((unit) => { const geometry = hexGeometry(unit.pos); return <g key={`mini-unit-${unit.id}`} className="mini-token mini-unit-token" transform={`translate(${geometry.cx} ${geometry.cy})`}><circle r="24" /><text textAnchor="middle" dominantBaseline="central">{UNIT_INFO[unit.type].short}</text></g>; })}
-                {visibleRivalPatrols.map(({ rival, pos }) => { const geometry = hexGeometry(pos); return <g key={`mini-patrol-${rival.id}`} className="mini-token mini-rival-token" transform={`translate(${geometry.cx} ${geometry.cy})`}><circle r="23" style={{ fill: rival.color }} /><text textAnchor="middle" dominantBaseline="central">{rival.token}</text></g>; })}
+                {visibleRivalPatrols.map(({ id, rival, pos }) => { const geometry = hexGeometry(pos); return <g key={`mini-patrol-${id}`} className="mini-token mini-rival-token" transform={`translate(${geometry.cx} ${geometry.cy})`}><circle r="23" style={{ fill: rival.color }} /><text textAnchor="middle" dominantBaseline="central">{rival.token}</text></g>; })}
               </svg>
             </div>
             <div className="mini-map-legend" aria-hidden="true"><span><i className="argentina" />阿根廷领土</span><span><i className="foreign" />外国领土</span><span><i className="surveyed" />已探索</span><span><i className="fog" />未探索</span></div>
             <div className="world-ranking" aria-label="六个文明每回合总产出列表">
-              <button className={citySelected ? "selected" : ""} style={{ "--civ-color": "#2b78cf", "--civ-tint": "#dceaf7" } as CSSProperties} onClick={() => { setGame((prev) => ({ ...prev, selectedUnitId: null, selectedTile: idFor(CITY_POS), message: "已选择阿根廷首都；这里显示我国当前的城市总产出。" })); focusMapOn(CITY_POS); }} disabled={aiThinking}>
-                <span className="world-civ"><b>🇦🇷</b><i><strong>阿根廷</strong><small>我国 · 布宜诺斯艾利斯</small></i></span>
+              <button className={citySelected ? "selected" : ""} style={{ "--civ-color": "#2b78cf", "--civ-tint": "#dceaf7" } as CSSProperties} onClick={() => { setManagingCityId(capital.id); setGame((prev) => ({ ...prev, selectedUnitId: null, selectedTile: idFor(capital.pos), message: `已选择阿根廷；${prev.cities.length} 座城市的总产出显示在这里。` })); focusMapOn(capital.pos); }} disabled={aiThinking}>
+                <span className="world-civ"><b>🇦🇷</b><i><strong>阿根廷</strong><small>我国 · {game.cities.length} 座城市 · 人口 {totalPopulation(game)}</small></i></span>
                 <span className="world-yields"><i className="food">粮 {cityYields.food}</i><i className="production">锤 {cityYields.production}</i><i className="science">科 {sciencePerTurn}</i><i className="culture">文 {culturePerTurn}</i></span>
               </button>
               {RIVALS.map((rival) => { const empire = rivalEmpires[rival.id]; const yields = rivalYieldsFor(game, rival.id, empire); const relation = game.rivalRelationships[rival.id]; return <button key={`rank-${rival.id}`} className={`${!citySelected && selectedRivalId === rival.id ? "selected" : ""} ${activeAiRival?.id === rival.id ? "ai-active" : ""}`} style={{ "--civ-color": rival.color, "--civ-tint": rival.tint } as CSSProperties} onClick={() => { setSelectedRivalId(rival.id); setGame((prev) => ({ ...prev, selectedUnitId: null, selectedTile: idFor(rival.capital), message: `已选择${rival.name}：${rival.agenda}。` })); }} disabled={aiThinking}>
@@ -2627,12 +3347,12 @@ export default function Home() {
       <div className={`action-dock ${citySelected ? "city-mode" : ""} ${foreignCitySelected ? "foreign-mode" : ""} ${placingProduction || growthChoosing ? "placement-hidden" : ""}`} role="region" aria-label={citySelected ? "首都生产操作" : foreignCitySelected ? `${selectedForeignCiv?.name}文明情报` : "选中单位操作"}>
         <div className="selected-unit">
           <span className="unit-portrait" aria-hidden="true">{selectedUnitInfo?.short ?? (citySelected ? "★" : foreignCitySelected ? selectedForeignCiv?.token : selectedKnown ? "⌖" : "?")}</span>
-          <div className="selected-copy"><small>{selectedUnit ? "● 单位已选择" : citySelected ? "● 首都已选择" : foreignCitySelected ? "● 外国首都已选择" : selectedKnown ? "当前地块" : "● 未知区域"}</small><strong>{selectedUnitInfo?.name ?? (citySelected ? "布宜诺斯艾利斯" : foreignCitySelected ? selectedForeignCiv?.capitalName : selectedKnown ? selectedImprovement?.name ?? selectedResource?.name ?? TERRAIN_INFO[selectedTerrain].label : "战争迷雾")}</strong>{selectedUnit && <span className="movement-pips" aria-label={`${selectedUnit.moves} / ${maxMoves} 移动力`}>{Array.from({ length: maxMoves }, (_, index) => <i className={index < selectedUnit.moves ? "available" : "spent"} key={index} />)}<b>{selectedUnit.moves}/{maxMoves}</b></span>}<span>{selectedUnit ? selectedUnit.moves > 0 ? "选择绿色六角格移动" : "本回合移动力已用完" : citySelected ? `人口 ${game.population} · +${productionPerTurn} 锤/回合` : foreignCitySelected ? `${selectedForeignCiv?.name}人口 ${foreignPopulation} · 距我国首都 ${hexDistance(CITY_POS, selectedForeignCiv!.capital)} 格` : selectedKnown ? "点击单位或首都下达命令" : "派侦察单位靠近以获取情报"}</span></div>
+          <div className="selected-copy"><small>{selectedUnit ? "● 单位已选择" : citySelected ? `● ${selectedPlayerCity?.isCapital ? "首都" : "城市"}已选择` : foreignCitySelected ? "● 外国首都已选择" : selectedKnown ? "当前地块" : "● 未知区域"}</small><strong>{selectedUnitInfo?.name ?? (citySelected ? selectedPlayerCity?.name : foreignCitySelected ? selectedForeignCiv?.capitalName : selectedKnown ? selectedImprovement?.name ?? selectedResource?.name ?? TERRAIN_INFO[selectedTerrain].label : "战争迷雾")}</strong>{selectedUnit && <span className="movement-pips" aria-label={`${selectedUnit.moves} / ${maxMoves} 移动力`}>{Array.from({ length: maxMoves }, (_, index) => <i className={index < selectedUnit.moves ? "available" : "spent"} key={index} />)}<b>{selectedUnit.moves}/{maxMoves}</b></span>}<span>{selectedUnit ? `${selectedUnit.hp}/${UNIT_MAX_HP} HP · ${selectedUnit.moves > 0 ? selectedUnit.type === "settler" ? "移动到合法地点后建立城市" : "绿色格移动，红色格攻击" : "本回合行动力已用完"}` : citySelected ? `人口 ${selectedPlayerCity?.population} · 城防 ${selectedPlayerCity?.hp}/${CITY_MAX_HP}` : foreignCitySelected ? `${selectedForeignCiv?.name}人口 ${foreignPopulation} · ${game.wars[selectedForeignCiv!.id] === "war" ? "交战中" : "和平"}` : selectedKnown ? "点击单位或城市下达命令" : "派侦察单位靠近以获取情报"}</span></div>
         </div>
         {citySelected ? (
           <div className="city-production-dock">
             <div className="dock-production-copy"><small>当前生产 · 建筑或单位</small><strong>{activeProduction?.name ?? "尚未安排生产"}</strong><span>{activeProduction ? `${activeProductionProgress}/${activeProduction.cost} 锤 · 预计 ${productionTurnsRemaining} 回合` : "选择建筑选址，或训练一个会自动部署的单位"}</span>{activeProduction && <i><em style={{ width: `${productionPercent}%` }} /></i>}</div>
-            <button onClick={openCapitalProduction} disabled={aiThinking || !hasAvailableProduction} data-testid="dock-production-button"><b>⚒</b><span>{activeProduction ? "更换生产" : hasAvailableProduction ? "选择生产" : "建设完成"}</span></button>
+            <button onClick={() => openCapitalProduction()} disabled={aiThinking || !hasAvailableProduction} data-testid="dock-production-button"><b>⚒</b><span>{activeProduction ? "更换生产" : hasAvailableProduction ? "选择生产" : "建设完成"}</span></button>
           </div>
         ) : foreignCitySelected && selectedForeignCiv && foreignYields ? (
           <div className="foreign-city-dock" aria-label={`${selectedForeignCiv.name}文明每回合总产出`}>
@@ -2645,12 +3365,13 @@ export default function Home() {
             <button disabled={!selectedUnit || selectedUnit.moves <= 0 || aiThinking} onClick={handleExplore} data-testid="explore-action"><b>◉</b><span>侦察</span></button>
             <button disabled={!selectedUnit || selectedUnit.moves <= 0 || aiThinking} onClick={handleWait}><b>⚑</b><span>驻扎</span></button>
             <button disabled={!selectedUnit || selectedUnit.moves <= 0 || aiThinking} onClick={handleWait}><b>↶</b><span>休整</span></button>
+            {selectedUnit?.type === "settler" && <button className="found-city-action" disabled={Boolean(settlementError(game, selectedUnit.pos, selectedUnit.id)) || aiThinking} onClick={handleFoundCity} data-testid="found-city"><b>★</b><span>建立城市</span></button>}
           </div>
         )}
       </div>
 
       {pendingDecision && !aiThinking && !game.result && !productionDrawerOpen && !strategyDrawerOpen && !growthDrawerOpen && !techPickerOpen && <button className="decision-prompt" onClick={handlePrimaryDecision} data-testid="primary-decision"><span>需要决定</span><div><strong>{pendingDecision.label}</strong><small>{pendingDecision.detail}</small></div><b>›</b></button>}
-      <button className="end-turn-button" onClick={requestEndTurn} disabled={aiThinking || Boolean(game.result) || Boolean(placingProduction) || productionDrawerOpen || strategyDrawerOpen || growthDrawerOpen || techPickerOpen} data-testid="end-turn"><span>{aiThinking ? "世界行动中" : game.pendingEvent ? "先决定故事" : game.growthPending > 0 ? "先选择成长" : game.celebrationPending ? "先选择庆典" : placingProduction ? "请选择地块" : "结束回合"}</span><small>{game.pendingEvent || game.growthPending > 0 || game.celebrationPending ? "!" : "Enter"}</small></button>
+      <button className="end-turn-button" onClick={requestEndTurn} disabled={aiThinking || Boolean(game.result) || Boolean(placingProduction) || productionDrawerOpen || strategyDrawerOpen || growthDrawerOpen || techPickerOpen} data-testid="end-turn"><span>{aiThinking ? "世界行动中" : game.pendingEvent ? "先决定故事" : totalGrowthPending > 0 ? "先选择成长" : game.celebrationPending ? "先选择庆典" : placingProduction ? "请选择地块" : "结束回合"}</span><small>{game.pendingEvent || totalGrowthPending > 0 || game.celebrationPending ? "!" : "Enter"}</small></button>
 
       <div className="event-toast" role={aiThinking ? "presentation" : "status"} aria-live={aiThinking ? "off" : "polite"}>{game.message}</div>
 
@@ -2684,7 +3405,7 @@ export default function Home() {
       <aside className={`production-drawer ${productionDrawerOpen ? "open" : ""} ${placingItem ? "placing" : ""}`} role="dialog" aria-modal="false" aria-labelledby="production-title" aria-hidden={!productionDrawerOpen}>
         <header className="production-drawer-header">
           {placingItem && <button className="drawer-back" onClick={() => cancelProductionPlacement(true)} aria-label="返回生产列表">‹</button>}
-          <div><span>{placingItem ? "建筑选址" : "城市生产"}</span><h2 id="production-title">{placingItem ? placingItem.name : "布宜诺斯艾利斯"}</h2><p>{placingItem ? placingItem.placementRule : `每回合 +${productionPerTurn} 锤 · 人口 ${game.population}`}</p></div>
+          <div><span>{placingItem ? "建筑选址" : "城市生产"}</span><h2 id="production-title">{placingItem ? placingItem.name : managingCity.name}</h2><p>{placingItem ? placingItem.placementRule : `每回合 +${productionPerTurn} 锤 · 人口 ${managingCity.population}`}</p></div>
           <button className="drawer-close" onClick={closeProductionDrawer} aria-label="关闭生产面板">×</button>
         </header>
 
@@ -2693,8 +3414,8 @@ export default function Home() {
         {!placingItem && activeProduction && (
           <section className="active-production-card" aria-label="当前生产">
             <span className="active-project-icon">{activeProduction.icon}</span>
-            <div><small>当前生产</small><strong>{activeProduction.name}</strong><p>{game.productionProgress[activeProduction.id]}/{activeProduction.cost} 锤 · {productionTurnsRemaining} 回合</p><i><b style={{ width: `${productionPercent}%` }} /></i></div>
-            <em>{activeProduction.kind === "building" ? game.buildingPlacements[activeProduction.id] ? "已落位" : "待选址" : "完成后自动部署"}</em>
+            <div><small>当前生产</small><strong>{activeProduction.name}</strong><p>{managingCity.productionProgress[activeProduction.id]}/{activeProduction.cost} 锤 · {productionTurnsRemaining} 回合</p><i><b style={{ width: `${productionPercent}%` }} /></i></div>
+            <em>{activeProduction.kind === "building" ? managingCity.buildingPlacements[activeProduction.id] ? "已落位" : "待选址" : "完成后自动部署"}</em>
           </section>
         )}
 
@@ -2723,17 +3444,17 @@ export default function Home() {
           </div>
         ) : (
           <div className="production-choice-view">
-            <div className="production-category-heading"><div><span>▾</span><strong>{productionCategory === "buildings" ? "建筑与城区" : "训练单位"}</strong></div><small>{productionCategory === "buildings" ? `${PRODUCTIONS.filter((item) => item.kind === "building").length - game.completedBuildings.length} 项未完成` : `${PRODUCTIONS.filter((item) => item.kind === "unit").length} 项可重复训练`}</small></div>
+            <div className="production-category-heading"><div><span>▾</span><strong>{productionCategory === "buildings" ? "建筑与城区" : "训练单位"}</strong></div><small>{productionCategory === "buildings" ? `${PRODUCTIONS.filter((item) => item.kind === "building").length - managingCity.completedBuildings.length} 项未完成` : `${PRODUCTIONS.filter((item) => item.kind === "unit").length} 项可重复训练`}</small></div>
             <section className={`production-list-section ${productionCategory}`}>
             <div className="production-list">
               {PRODUCTIONS.filter((production) => productionCategory === "buildings" ? production.kind === "building" : production.kind === "unit").map((production) => {
-                const done = production.kind === "building" && game.completedBuildings.includes(production.id);
-                const active = game.activeProduction === production.id;
-                const progress = game.productionProgress[production.id];
+                const done = production.kind === "building" && managingCity.completedBuildings.includes(production.id);
+                const active = managingCity.activeProduction === production.id;
+                const progress = managingCity.productionProgress[production.id];
                 const turns = Math.max(1, Math.ceil((production.cost - progress) / productionPerTurn));
-                const adjacency = production.kind === "building" ? bestAvailableAdjacency(game, production.id) : null;
-                const placed = production.kind === "building" && Boolean(game.buildingPlacements[production.id]);
-                return <button key={production.id} disabled={done} className={`production-list-item ${production.kind === "unit" ? "unit-production" : ""} ${active ? "active" : ""}`} onClick={() => chooseProduction(production.id)} data-testid={`production-${production.id}`}><span className={`project-yield ${production.kind === "unit" ? "unit" : production.yield}`}>{production.icon}</span><div className="production-item-copy"><em>{production.category}</em><h3>{production.name}</h3><p>{production.effect}{adjacency !== null ? ` · 最高相邻 +${adjacency}` : ""}</p>{progress > 0 && !done && <i><b style={{ width: `${Math.min(100, progress / production.cost * 100)}%` }} /></i>}<small>{done ? "已建成" : production.kind === "unit" ? "完成后从首都或相邻空格自动部署" : placed ? "已落位 · 可继续建造" : production.placementRule}</small></div><div className="production-item-cost"><strong>{done ? "✓" : turns}</strong><span>{done ? "完成" : "回合"}</span><small>{production.cost} 锤</small></div></button>;
+                const adjacency = production.kind === "building" ? bestAvailableAdjacency(game, managingCity.id, production.id) : null;
+                const placed = production.kind === "building" && Boolean(managingCity.buildingPlacements[production.id]);
+                return <button key={production.id} disabled={done} className={`production-list-item ${production.kind === "unit" ? "unit-production" : ""} ${active ? "active" : ""}`} onClick={() => chooseProduction(production.id)} data-testid={`production-${production.id}`}><span className={`project-yield ${production.kind === "unit" ? "unit" : production.yield}`}>{production.icon}</span><div className="production-item-copy"><em>{production.category}</em><h3>{production.name}</h3><p>{production.effect}{adjacency !== null ? ` · 最高相邻 +${adjacency}` : ""}</p>{progress > 0 && !done && <i><b style={{ width: `${Math.min(100, progress / production.cost * 100)}%` }} /></i>}<small>{done ? "已建成" : production.kind === "unit" ? `完成后从${managingCity.name}旁自动部署` : placed ? "已落位 · 可继续建造" : production.placementRule}</small></div><div className="production-item-cost"><strong>{done ? "✓" : turns}</strong><span>{done ? "完成" : "回合"}</span><small>{production.cost} 锤</small></div></button>;
               })}
             </div>
             </section>
@@ -2743,10 +3464,10 @@ export default function Home() {
       </aside>
 
       <aside className={`growth-drawer ${growthDrawerOpen ? "open" : ""}`} role="dialog" aria-modal="false" aria-labelledby="growth-title" aria-hidden={!growthDrawerOpen}>
-        <header className="growth-drawer-header"><div><span>城市成长 · 粮食驱动</span><h2 id="growth-title">{game.growthPending > 0 ? "人口 +1 · 选择新地块" : "布宜诺斯艾利斯成长"}</h2><p>{game.growthPending > 0 ? "开发一格后，政治边界自动覆盖它外围的一圈。" : "开发区块决定城市边界；成长槽满后直接开发地块。"}</p></div><button className="drawer-close" onClick={() => { setGrowthDrawerOpen(false); setGrowthCandidate(null); }} aria-label="关闭城市成长">×</button></header>
+        <header className="growth-drawer-header"><div><span>城市成长 · 粮食驱动</span><h2 id="growth-title">{managingCity.growthPending > 0 ? `${managingCity.name} · 人口 +1` : `${managingCity.name}成长`}</h2><p>{managingCity.growthPending > 0 ? "开发一格后，政治边界自动覆盖它外围的一圈。" : "开发区块决定城市边界；成长槽满后直接开发地块。"}</p></div><button className="drawer-close" onClick={() => { setGrowthDrawerOpen(false); setGrowthCandidate(null); }} aria-label="关闭城市成长">×</button></header>
         <div className="growth-drawer-body">
-          <section className={`growth-hero-card ${game.growthPending > 0 ? "ready" : ""}`}><div className="growth-pop-change"><span>{game.population}</span><i>→</i><strong>{game.population + (game.growthPending > 0 ? 1 : 0)}</strong><small>人口</small></div><div className="growth-hero-copy"><small>{game.growthPending > 0 ? `待分配 ${game.growthPending} 次成长` : "下一次成长"}</small><strong>{game.growthPending > 0 ? "选择一个青色六角格" : `还需 ${Math.max(0, cityGrowthTarget - game.food)} 食物`}</strong><i><b style={{ width: `${game.growthPending > 0 ? 100 : Math.min(100, game.food / cityGrowthTarget * 100)}%` }} /></i><p>开发核心 {playerDevelopedTiles.size} 格（含首都） · 边界 {game.ownedTiles.length} 格</p></div></section>
-          {game.growthPending > 0 ? <>
+          <section className={`growth-hero-card ${managingCity.growthPending > 0 ? "ready" : ""}`}><div className="growth-pop-change"><span>{managingCity.population}</span><i>→</i><strong>{managingCity.population + (managingCity.growthPending > 0 ? 1 : 0)}</strong><small>人口</small></div><div className="growth-hero-copy"><small>{managingCity.growthPending > 0 ? `待分配 ${managingCity.growthPending} 次成长` : "下一次成长"}</small><strong>{managingCity.growthPending > 0 ? "选择一个青色六角格" : `还需 ${Math.max(0, cityGrowthTarget - managingCity.food)} 食物`}</strong><i><b style={{ width: `${managingCity.growthPending > 0 ? 100 : Math.min(100, managingCity.food / cityGrowthTarget * 100)}%` }} /></i><p>{managingCity.name}开发核心 {cityDevelopedTileIds(managingCity).length} 格 · 全国边界 {game.ownedTiles.length} 格</p></div></section>
+          {managingCity.growthPending > 0 ? <>
             <div className="growth-steps"><span className="done">1 粮食槽满</span><i /><span className={growthCandidate ? "done" : "active"}>2 选择地块</span><i /><span className={growthCandidate ? "active" : ""}>3 确认</span></div>
             <p className="growth-instruction">青色格属于当前边界，并且紧邻已有开发区；设施由地形和资源自动匹配。</p>
             <section className="growth-recommendations"><header><strong>总督建议</strong><span>{growthOptions.size} 格可选</span></header>{recommendedGrowthOptions.map(([tileId, option], index) => { const pos = posForId(tileId); return <button key={tileId} className={growthCandidate === tileId ? "active" : ""} onClick={() => { setGrowthCandidate(tileId); setGame((prev) => ({ ...prev, selectedTile: tileId, selectedUnitId: null, message: `已选择${IMPROVEMENT_INFO[option.improvement].name}方案。` })); focusMapOn(pos); }} data-testid={`growth-option-${tileId}`}><b>{index + 1}</b><div><strong>{RESOURCE_TILES[tileId] ? RESOURCE_INFO[RESOURCE_TILES[tileId]].name : TERRAIN_INFO[terrainAt(pos)].label}</strong><small>{option.borderGain > 0 ? `边界 +${option.borderGain}` : "填充核心"} · {IMPROVEMENT_INFO[option.improvement].name}</small></div><span>粮{option.after.food} 锤{option.after.production}<br />科{option.after.science} 文{option.after.culture} 金{option.after.gold}</span></button>; })}</section>
@@ -2791,21 +3512,22 @@ export default function Home() {
 
         {strategyTab === "diplomacy" && <section className="strategy-panel" role="tabpanel">
           <div className="diplomacy-civ-tabs" aria-label="选择外交对象">{RIVALS.map((rival) => <button key={`diplomacy-${rival.id}`} className={selectedRivalId === rival.id ? "active" : ""} style={{ "--civ-color": rival.color } as CSSProperties} onClick={() => setSelectedRivalId(rival.id)}><span>{rival.flag}</span><small>{rival.name}</small></button>)}</div>
-          <div className="diplomacy-hero" style={{ "--civ-color": selectedRival.color } as CSSProperties}><span className="leader-medallion">{selectedRival.token}</span><div><small>{selectedRival.leader} · {selectedRival.name}</small><h3>{relationshipLabel}</h3><p>首都{selectedRival.capitalName} · 距离 {hexDistance(CITY_POS, selectedRival.capital)} 格</p></div><b>影响力 {game.influence}</b></div>
+          <div className="diplomacy-hero" style={{ "--civ-color": selectedRival.color } as CSSProperties}><span className="leader-medallion">{selectedRival.token}</span><div><small>{selectedRival.leader} · {selectedRival.name}</small><h3>{game.defeatedRivals.includes(selectedRivalId) ? "已退出时代" : game.wars[selectedRivalId] === "war" ? "交战中" : relationshipLabel}</h3><p>首都{selectedRival.capitalName} · 距离 {hexDistance(capital.pos, selectedRival.capital)} 格</p></div><b>{game.wars[selectedRivalId] === "war" ? `城防 ${game.rivalCityHp[selectedRivalId]}` : `影响力 ${game.influence}`}</b></div>
           <div className="leader-agenda"><span>领袖议程</span><div><strong>{selectedRival.agenda}</strong><p>{selectedRival.agendaDetail}</p></div><b>{agendaRelationDelta(game, selectedRivalId) > 0 ? "+1/回合" : "未满足"}</b></div>
           <div className="relationship-meter"><header><span>双边关系</span><strong>{selectedRelationship}/100 · {relationshipLabel}</strong></header><i><span style={{ width: `${selectedRelationship}%`, background: selectedRival.color }} /></i><footer><span>敌对</span><span>中立</span><span>互助</span></footer></div>
           <div className="strategy-summary"><div><small>我国影响力</small><strong>{game.influence}</strong><em>+{influencePerTurn}/回合</em></div><div><small>{selectedRival.name}地区影响</small><strong>{game.rivalInfluence[selectedRivalId]}/100</strong><em>达到 100 将失败</em></div><div><small>贸易路线</small><strong>{game.tradePartner === selectedRivalId ? game.tradeRouteTurns : "—"}</strong><em>{game.tradePartner === selectedRivalId ? `输入${RESOURCE_INFO[selectedRival.resource].name}` : game.tradePartner ? `正与${RIVAL_BY_ID[game.tradePartner].name}贸易` : "尚未建立"}</em></div></div>
           <h3>外交行动</h3>
           <div className="diplomatic-actions">
-            <button className={`action-card ${game.tradePartner === selectedRivalId && game.tradeRouteTurns > 0 ? "active" : ""}`} disabled={aiThinking || game.influence < 12 || selectedRelationship < 40 || game.tradeRouteTurns > 0 || game.sanctionTurns > 0} onClick={() => handleDiplomaticAction("trade")} data-testid="diplomacy-trade"><span className="action-icon">⇄</span><div><h4>建立贸易路线</h4><p>6 回合金币 +4、科技 +1，并复制{RESOURCE_INFO[selectedRival.resource].name}资源加成。</p></div><b className="action-cost">◇12</b></button>
-            <button className={`action-card ${game.researchPartner === selectedRivalId && game.researchCollaborationTurns > 0 ? "active" : ""}`} disabled={aiThinking || game.influence < 18 || selectedRelationship < 55 || game.researchCollaborationTurns > 0 || game.sanctionTurns > 0} onClick={() => handleDiplomaticAction("research")} data-testid="diplomacy-research"><span className="action-icon">◆</span><div><h4>联合研究</h4><p>需要友好关系；4 回合科技 +2，关系逐回合改善。</p></div><b className="action-cost">◇18</b></button>
+            <button className={`action-card ${game.tradePartner === selectedRivalId && game.tradeRouteTurns > 0 ? "active" : ""}`} disabled={aiThinking || game.wars[selectedRivalId] === "war" || game.influence < 12 || selectedRelationship < 40 || game.tradeRouteTurns > 0 || game.sanctionTurns > 0} onClick={() => handleDiplomaticAction("trade")} data-testid="diplomacy-trade"><span className="action-icon">⇄</span><div><h4>建立贸易路线</h4><p>6 回合金币 +4、科技 +1，并复制{RESOURCE_INFO[selectedRival.resource].name}资源加成。</p></div><b className="action-cost">◇12</b></button>
+            <button className={`action-card ${game.researchPartner === selectedRivalId && game.researchCollaborationTurns > 0 ? "active" : ""}`} disabled={aiThinking || game.wars[selectedRivalId] === "war" || game.influence < 18 || selectedRelationship < 55 || game.researchCollaborationTurns > 0 || game.sanctionTurns > 0} onClick={() => handleDiplomaticAction("research")} data-testid="diplomacy-research"><span className="action-icon">◆</span><div><h4>联合研究</h4><p>需要友好关系；4 回合科技 +2，关系逐回合改善。</p></div><b className="action-cost">◇18</b></button>
             <button className={`action-card ${game.sanctionedRival === selectedRivalId && game.sanctionTurns > 0 ? "active" : ""}`} disabled={aiThinking || game.influence < 15 || game.sanctionTurns > 0 || game.tradeRouteTurns > 0 || game.researchCollaborationTurns > 0} onClick={() => handleDiplomaticAction("sanction")} data-testid="diplomacy-sanction"><span className="action-icon">!</span><div><h4>公开谴责</h4><p>3 回合压低{selectedRival.name}影响力增长，但显著恶化关系。</p></div><b className="action-cost">◇15</b></button>
+            <button className={`action-card war-action ${game.wars[selectedRivalId] === "war" ? "active" : ""}`} disabled={aiThinking || game.wars[selectedRivalId] === "war" || game.defeatedRivals.includes(selectedRivalId)} onClick={() => handleDiplomaticAction("war")} data-testid="diplomacy-war"><span className="action-icon">⚔</span><div><h4>{game.wars[selectedRivalId] === "war" ? "战争进行中" : `向${selectedRival.name}宣战`}</h4><p>宣战后双方单位可交战；电脑军队会寻路攻击单位与城市。</p></div><b className="action-cost">{game.wars[selectedRivalId] === "war" ? "战争" : "宣战"}</b></button>
           </div>
         </section>}
 
         {strategyTab === "happiness" && <section className="strategy-panel" role="tabpanel">
           <div className="happiness-hero"><div className="happiness-ring" style={{ "--happiness": `${Math.min(100, game.happiness / HAPPINESS_TARGET * 100)}%` } as CSSProperties}><div><strong>{game.happiness}</strong><small>/ {HAPPINESS_TARGET}</small></div></div><div><h3>{game.celebrationPending ? "人民期待一场庆典" : game.celebration ? CELEBRATIONS[game.celebration].name : "城市安居乐业"}</h3><p>建筑、外交与贸易提高每回合幸福度；人口压力会降低增长。幸福过低时城市总产出下降。</p><b>{game.celebration ? `奖励剩余 ${game.celebrationTurns} 回合` : `每回合 +${happinessPerTurn}`}</b></div></div>
-          <div className="strategy-summary"><div><small>建筑贡献</small><strong>+{game.completedBuildings.length}</strong><em>每座建筑 +1</em></div><div><small>外交与贸易</small><strong>+{(game.tradeRouteTurns > 0 ? 2 : 0) + (Math.max(...Object.values(game.rivalRelationships)) >= 65 ? 1 : 0)}</strong><em>稳定关系有益</em></div><div><small>人口压力</small><strong>-{Math.max(0, game.population - 4)}</strong><em>5 人口后增加</em></div></div>
+          <div className="strategy-summary"><div><small>建筑贡献</small><strong>+{allCompletedBuildings(game).length}</strong><em>每座建筑 +1</em></div><div><small>外交与贸易</small><strong>+{(game.tradeRouteTurns > 0 ? 2 : 0) + (Math.max(...Object.values(game.rivalRelationships)) >= 65 ? 1 : 0)}</strong><em>稳定关系有益</em></div><div><small>人口压力</small><strong>-{Math.max(0, totalPopulation(game) - 4)}</strong><em>5 人口后增加</em></div></div>
           <h3>{game.celebrationPending ? "选择本次庆典" : "庆典奖励"}</h3>
           <div className="celebration-grid">
             {(Object.keys(CELEBRATIONS) as CelebrationId[]).map((celebrationId) => {
@@ -2822,8 +3544,8 @@ export default function Home() {
           <section className="result-modal" role="dialog" aria-modal="true" aria-labelledby="result-title">
             <span className="result-emblem">{game.result === "win" ? "✺" : "◒"}</span>
             <div className="card-kicker">{game.result === "win" ? "历史性胜利" : "时代落幕"}</div>
-            <h2 id="result-title">{game.result === "win" ? "阿根廷迎来文明曙光" : `${worldLeader.name}赢得地区影响力`}</h2>
-            <p>{game.result === "win" ? "布宜诺斯艾利斯繁荣昌盛，科技、文化、经济与探索四条遗产路径照亮新时代。" : "重新规划探索、发展与外交节奏，再次带领阿根廷出发。"}</p>
+            <h2 id="result-title">{game.result === "win" ? game.resultReason === "conquest" ? "阿根廷赢得征服胜利" : "阿根廷迎来文明曙光" : game.resultReason === "conquest" ? "阿根廷失去了最后一座城市" : `${worldLeader.name}赢得地区影响力`}</h2>
+            <p>{game.result === "win" ? game.resultReason === "conquest" ? "五个对手的首都已经陷落，阿根廷军队结束了曙光时代的战争。" : "多座城市共同推动科技、文化、经济与探索，照亮新时代。" : game.resultReason === "conquest" ? "电脑军队攻破了所有阿根廷城市；利用城防、单位与分城重新组织战线。" : "重新规划探索、发展与外交节奏，再次带领阿根廷出发。"}</p>
             <button onClick={resetGame}>重新开始</button>
           </section>
         </div>

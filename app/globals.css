@@ -711,6 +711,35 @@ button { font: inherit; }
   *, *::before, *::after { scroll-behavior: auto !important; transition-duration: .01ms !important; animation-duration: .01ms !important; }
 }
 
+/* v6: multi-city, settlers and readable combat states */
+.city-tabs { display: flex; gap: 5px; overflow-x: auto; margin: 8px 0; padding: 2px 0 5px; scrollbar-width: thin; }
+.city-tabs button { min-width: 106px; display: grid; grid-template-columns: auto minmax(0,1fr) auto; align-items: center; gap: 5px; padding: 6px 7px; border: 1px solid rgba(40,68,58,.18); border-radius: 7px; color: #344b43; background: rgba(255,255,255,.5); cursor: pointer; text-align: left; }
+.city-tabs button.active { border-color: #3b77ad; color: #173d62; background: #dceaf5; box-shadow: inset 0 -2px 0 #3476ae; }
+.city-tabs button b { color: #2e74ac; }.city-tabs button span { overflow: hidden; font-size: 8px; font-weight: 900; text-overflow: ellipsis; white-space: nowrap; }.city-tabs button em { font-size: 8px; font-style: normal; font-weight: 900; }
+.core-loop-shortcuts { display: grid; grid-template-columns: 1fr 1fr; gap: 5px; margin: 8px 0 4px; }
+.core-loop-shortcuts button { min-width: 0; display: grid; grid-template-columns: 25px minmax(0,1fr); align-items: center; gap: 6px; padding: 6px; border: 1px solid rgba(47,91,77,.22); border-radius: 7px; color: #29483d; background: linear-gradient(180deg,#f7f4e9,#e7eee6); cursor: pointer; text-align: left; }
+.core-loop-shortcuts button:last-child { border-color: rgba(151,55,47,.25); color: #79332d; background: linear-gradient(180deg,#fbf2e9,#f0dfd5); }
+.core-loop-shortcuts button > b { width: 24px; height: 24px; display: grid; place-items: center; border-radius: 50%; color: white; background: #39775d; font-size: 10px; }.core-loop-shortcuts button:last-child > b { background: #9b4138; }
+.core-loop-shortcuts button > span { min-width: 0; display: flex; flex-direction: column; font-size: 8px; font-weight: 900; }.core-loop-shortcuts small { color: #77857f; font-size: 6px; font-weight: 700; }
+.secondary-city-piece .place-label { border-color: #6698bd; background: linear-gradient(180deg,rgba(245,251,255,.97),rgba(218,235,246,.97)); }
+.city-hp { height: 3px; display: block; overflow: hidden; margin-top: 3px; border-radius: 99px; background: rgba(24,40,36,.2); }
+.city-hp u { height: 100%; display: block; border-radius: inherit; background: linear-gradient(90deg,#b33b35,#e1b84b 45%,#55a56b); transition: width 180ms ease; }
+.unit-token > i { width: 40px; height: 4px; position: absolute; left: 0; bottom: -10px; overflow: hidden; border: 1px solid rgba(255,255,255,.9); border-radius: 99px; background: rgba(32,38,36,.8); box-shadow: 0 1px 3px rgba(0,0,0,.35); }
+.unit-token > i > u { height: 100%; display: block; background: linear-gradient(90deg,#b74038,#e5c34d 48%,#5eb172); }
+.unit-token.settler { color: #443820; background: linear-gradient(145deg,#f0d27c,#b88a37); }
+.settler-piece .unit-label { color: #f3d98d; }
+.attack-overlay { display: grid !important; place-items: center; position: absolute !important; inset: 4px; z-index: 7; color: #fff; background: rgba(117,20,20,.12); pointer-events: none; filter: drop-shadow(0 0 5px rgba(132,23,23,.65)); }
+.attack-overlay .hex-ring { position: absolute; inset: 0; width: 100%; height: 100%; fill: rgba(143,28,24,.13); stroke: #d64f43; stroke-width: 5px; vector-effect: non-scaling-stroke; }
+.attack-overlay b { position: relative; z-index: 1; display: grid; place-items: center; width: 25px; height: 25px; border: 2px solid white; border-radius: 50%; background: #a52e2b; box-shadow: 0 3px 8px rgba(45,12,10,.42); font-size: 13px; }
+.attack-overlay small { position: relative; z-index: 1; margin-top: 1px; padding: 2px 5px; border-radius: 99px; color: white; background: #74201e; font-size: 6px; font-weight: 900; }
+.hex-tile.attackable { cursor: crosshair; }
+.rival-piece.at-war .unit-token { box-shadow: 0 0 0 4px #851e1b,0 0 0 7px rgba(226,73,58,.45),0 5px 13px rgba(38,8,8,.42); }
+.action-buttons .found-city-action { border-color: rgba(232,201,103,.65); color: #ffefb3; background: rgba(197,148,44,.18); }
+.war-action { border-color: rgba(202,73,63,.38); background: rgba(142,35,30,.08); }
+.war-action .action-icon { color: #ff978d !important; border-color: rgba(224,89,78,.45) !important; background: rgba(109,26,23,.42) !important; }
+.war-action.active { border-color: rgba(224,89,78,.64); background: rgba(154,38,32,.18); }
+.war-action.active::after { content: "交战中"; color: #ff9a90; }
+
 .tech-change {
   width: 100%;
   margin-top: 10px;

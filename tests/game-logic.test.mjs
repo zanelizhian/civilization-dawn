@@ -5,7 +5,34 @@ import test from "node:test";
 import { build } from "esbuild";
 
 const source = `${readFileSync(new URL("../app/page.tsx", import.meta.url), "utf8")}
-export { createInitialState, makeLocalSave, readLocalSave, deriveRivalEmpires, improvementTypeAt, hexDistance, CITY_POS, RIVALS, COLS, ROWS, territoryFromDeveloped, playerDevelopedTileIds };`;
+export {
+  createInitialState,
+  makeLocalSave,
+  readLocalSave,
+  deriveRivalEmpires,
+  improvementTypeAt,
+  hexDistance,
+  CITY_POS,
+  RIVALS,
+  COLS,
+  ROWS,
+  territoryFromDeveloped,
+  playerDevelopedTileIds,
+  playerOwnedTilesForCities,
+  settlementError,
+  foundCity,
+  resolvePlayerEconomyRound,
+  declareWar,
+  resolvePlayerAttack,
+  advanceRivalMilitaryPhase,
+  advanceRivalProduction,
+  PRODUCTIONS,
+  RIVAL_UNIT_COST,
+  UNIT_MAX_HP,
+  terrainAt,
+  neighbors,
+};`;
+
 const bundled = await build({
   stdin: { contents: source, loader: "tsx", resolveDir: new URL("..", import.meta.url).pathname, sourcefile: "page.logic-test.tsx" },
   bundle: true,
@@ -29,6 +56,19 @@ const {
   ROWS,
   territoryFromDeveloped,
   playerDevelopedTileIds,
+  playerOwnedTilesForCities,
+  settlementError,
+  foundCity,
+  resolvePlayerEconomyRound,
+  declareWar,
+  resolvePlayerAttack,
+  advanceRivalMilitaryPhase,
+  advanceRivalProduction,
+  PRODUCTIONS,
+  RIVAL_UNIT_COST,
+  UNIT_MAX_HP,
+  terrainAt,
+  neighbors,
 } = runtimeModule.exports;
 
 const idFor = (pos) => `${pos.col}-${pos.row}`;
@@ -47,6 +87,7 @@ const adjacentPositions = (pos) => {
 
 const inBounds = (pos) => pos.col >= 0 && pos.col < COLS && pos.row >= 0 && pos.row < ROWS;
 const sorted = (values) => [...values].sort((a, b) => a.localeCompare(b));
+const allTileIds = () => Array.from({ length: COLS * ROWS }, (_, index) => `${index % COLS}-${Math.floor(index / COLS)}`);
 
 const expectedTerritory = (developedTileIds) => {
   const result = new Set();
@@ -78,6 +119,30 @@ const assertConnected = (tileIds, origin, message) => {
   assert.equal(reached.size, tiles.size, `${message}: tiles must form one connected region`);
 };
 
+const discoverWorld = (state) => ({ ...state, discovered: new Set(allTileIds()) });
+
+const firstLegalSettlement = (state) => {
+  for (let row = 0; row < ROWS; row += 1) {
+    for (let col = 0; col < COLS; col += 1) {
+      const pos = { col, row };
+      if (settlementError(state, pos, "settler-test") === null) return pos;
+    }
+  }
+  throw new Error("expected at least one legal settlement tile");
+};
+
+const stateWithSecondCity = () => {
+  const explored = discoverWorld(createInitialState());
+  const pos = firstLegalSettlement(explored);
+  const withSettler = {
+    ...explored,
+    units: [...explored.units, { id: "settler-test", type: "settler", pos, moves: 2, hp: UNIT_MAX_HP }],
+    selectedUnitId: "settler-test",
+    selectedTile: idFor(pos),
+  };
+  return { pos, before: withSettler, after: foundCity(withSettler, "settler-test") };
+};
+
 test("the enlarged world uses the planned 32 by 18 layout", () => {
   assert.equal(COLS, 32);
   assert.equal(ROWS, 18);
@@ -99,13 +164,15 @@ test("the enlarged world uses the planned 32 by 18 layout", () => {
   }
 });
 
-test("new games start from one developed capital and round-trip through save v5", () => {
+test("new games start with one city and round-trip through a v6 save", () => {
   const initial = createInitialState();
   const capitalId = idFor(CITY_POS);
   const developed = playerDevelopedTileIds(initial);
 
-  assert.equal(initial.population, 1);
-  assert.deepEqual(initial.ruralTiles, []);
+  assert.equal(initial.cities.length, 1);
+  assert.equal(initial.cities[0].isCapital, true);
+  assert.equal(initial.cities[0].population, 1);
+  assert.deepEqual(initial.cities[0].ruralTiles, []);
   assert.deepEqual(sorted(developed), [capitalId]);
   assert.deepEqual(sorted(initial.ownedTiles), expectedTerritory([capitalId]));
   assert.equal(initial.ownedTiles.length, 7);
@@ -113,29 +180,158 @@ test("new games start from one developed capital and round-trip through save v5"
   assert.deepEqual(sorted(territoryFromDeveloped(developed)), expectedTerritory(developed));
 
   const save = makeLocalSave(initial);
-  assert.equal(save.version, 5);
+  assert.equal(save.version, 6);
   const restored = readLocalSave(JSON.stringify(save));
   assert.equal(restored.ok, true);
   assert.ok(restored.ok);
-  assert.equal(restored.game.population, 1);
-  assert.deepEqual(restored.game.ruralTiles, []);
+  assert.equal(restored.game.cities.length, 1);
+  assert.equal(restored.game.cities[0].population, 1);
+  assert.deepEqual(restored.game.cities[0].ruralTiles, []);
   assert.deepEqual(sorted(restored.game.ownedTiles), expectedTerritory([capitalId]));
   assert.ok(restored.game.discovered instanceof Set);
   assert.equal(improvementTypeAt(restored.game, capitalId), "palace");
 
-  const obsolete = readLocalSave(JSON.stringify({ ...save, version: 4 }));
+  const obsolete = readLocalSave(JSON.stringify({ ...save, version: 5 }));
   assert.deepEqual(obsolete, { ok: false, reason: "version" });
 });
 
-test("player territory is always the developed core plus one border ring", () => {
-  const state = createInitialState();
-  state.ruralTiles = ["5-4"];
-  state.builtImprovements = { "5-4": "farm" };
-  state.buildingPlacements = { monument: "4-5" };
+test("territory is the union of every city's developed core plus exactly one ring", () => {
+  const { after } = stateWithSecondCity();
+  assert.equal(after.cities.length, 2);
+  const used = new Set(after.cities.map((city) => idFor(city.pos)));
+  const cities = after.cities.map((city) => {
+    const rural = neighbors(city.pos).find((pos) => {
+      const terrain = terrainAt(pos);
+      return terrain !== "water" && terrain !== "mountain" && !used.has(idFor(pos));
+    });
+    assert.ok(rural, `expected a developable tile near ${city.name}`);
+    used.add(idFor(rural));
+    return { ...city, ruralTiles: [idFor(rural)] };
+  });
+  const developed = playerDevelopedTileIds({ cities });
+  const owned = playerOwnedTilesForCities(cities);
 
-  const developed = playerDevelopedTileIds(state);
-  assert.deepEqual(sorted(developed), sorted([idFor(CITY_POS), "5-4", "4-5"]));
+  assert.equal(developed.length, 4);
+  assert.deepEqual(sorted(owned), expectedTerritory(developed));
   assert.deepEqual(sorted(territoryFromDeveloped(developed)), expectedTerritory(developed));
+});
+
+test("settlers reject illegal sites, found a legal second city, and are consumed atomically", () => {
+  const initial = discoverWorld(createInitialState());
+  assert.match(settlementError(initial, CITY_POS, "settler-test"), /距离现有城市/);
+
+  const { pos, before, after } = stateWithSecondCity();
+  assert.equal(settlementError(before, pos, "settler-test"), null);
+  assert.equal(after.cities.length, 2);
+  assert.deepEqual(after.cities[1].pos, pos);
+  assert.equal(after.cities[1].population, 1);
+  assert.equal(after.cities[1].isCapital, false);
+  assert.equal(after.nextCitySerial, before.nextCitySerial + 1);
+  assert.equal(after.units.some((unit) => unit.id === "settler-test"), false);
+  assert.equal(after.selectedUnitId, null);
+  assert.ok(after.discovered.has(idFor(pos)));
+  assert.deepEqual(sorted(after.ownedTiles), expectedTerritory(playerDevelopedTileIds(after)));
+
+  const illegalSettler = { ...initial, units: [...initial.units, { id: "settler-test", type: "settler", pos: CITY_POS, moves: 2, hp: UNIT_MAX_HP }] };
+  const rejected = foundCity(illegalSettler, "settler-test");
+  assert.equal(rejected.cities.length, 1);
+  assert.equal(rejected.units.some((unit) => unit.id === "settler-test"), true);
+});
+
+test("two cities advance independent production queues and deploy their own units", () => {
+  const { after } = stateWithSecondCity();
+  const scout = PRODUCTIONS.find((project) => project.id === "scout");
+  const settler = PRODUCTIONS.find((project) => project.id === "settler");
+  assert.ok(scout && settler);
+  const cities = after.cities.map((city, index) => {
+    const project = index === 0 ? scout : settler;
+    return {
+      ...city,
+      activeProduction: project.id,
+      productionProgress: { ...city.productionProgress, [project.id]: project.cost - 1 },
+    };
+  });
+  const beforeUnitIds = new Set(after.units.map((unit) => unit.id));
+  const resolved = resolvePlayerEconomyRound({ ...after, cities });
+  const newUnits = resolved.units.filter((unit) => !beforeUnitIds.has(unit.id));
+
+  assert.equal(resolved.turn, after.turn + 1);
+  assert.equal(resolved.cities.length, 2);
+  assert.equal(resolved.cities[0].activeProduction, null);
+  assert.equal(resolved.cities[1].activeProduction, null);
+  assert.equal(resolved.cities[0].productionProgress.scout, 0);
+  assert.equal(resolved.cities[1].productionProgress.settler, 0);
+  assert.deepEqual(sorted(newUnits.map((unit) => unit.type)), ["scout", "settler"]);
+  assert.equal(newUnits.every((unit) => unit.moves > 0 && unit.hp === UNIT_MAX_HP), true);
+  assert.equal(newUnits.some((unit) => hexDistance(unit.pos, cities[0].pos) === 1), true);
+  assert.equal(newUnits.some((unit) => hexDistance(unit.pos, cities[1].pos) === 1), true);
+});
+
+const combatSetup = (enemyHp = UNIT_MAX_HP) => {
+  const initial = createInitialState();
+  const attacker = initial.units[0];
+  const target = neighbors(attacker.pos)[0];
+  const brazilUnit = initial.rivalUnits.find((unit) => unit.rivalId === "brazil");
+  assert.ok(brazilUnit);
+  const rivalUnits = initial.rivalUnits
+    .filter((unit) => unit.id === brazilUnit.id || idFor(unit.pos) !== idFor(target))
+    .map((unit) => unit.id === brazilUnit.id ? { ...unit, pos: target, hp: enemyHp, moves: 2 } : unit);
+  return { state: { ...initial, rivalUnits }, attacker, enemyId: brazilUnit.id, target };
+};
+
+test("declaring war enables damage, counter-damage, death, and advance into the defeated tile", () => {
+  const live = combatSetup();
+  const peacefulAttempt = resolvePlayerAttack(live.state, live.attacker.id, live.target);
+  assert.equal(peacefulAttempt.rivalUnits.find((unit) => unit.id === live.enemyId).hp, UNIT_MAX_HP);
+  assert.match(peacefulAttempt.message, /先在外交窗口宣战/);
+
+  const war = declareWar(live.state, "brazil");
+  assert.equal(war.wars.brazil, "war");
+  assert.ok(war.rivalRelationships.brazil <= 15);
+  const exchange = resolvePlayerAttack(war, live.attacker.id, live.target);
+  assert.ok(exchange.rivalUnits.find((unit) => unit.id === live.enemyId).hp < UNIT_MAX_HP);
+  assert.ok(exchange.units.find((unit) => unit.id === live.attacker.id).hp < UNIT_MAX_HP);
+  assert.equal(exchange.units.find((unit) => unit.id === live.attacker.id).moves, 0);
+
+  const doomed = combatSetup(1);
+  const victory = resolvePlayerAttack(declareWar(doomed.state, "brazil"), doomed.attacker.id, doomed.target);
+  assert.equal(victory.rivalUnits.some((unit) => unit.id === doomed.enemyId), false);
+  const survivor = victory.units.find((unit) => unit.id === doomed.attacker.id);
+  assert.ok(survivor);
+  assert.deepEqual(survivor.pos, doomed.target);
+  assert.equal(survivor.moves, 0);
+});
+
+test("a rival army attacks adjacent Argentine targets during its war phase", () => {
+  const setup = combatSetup();
+  const war = declareWar(setup.state, "brazil");
+  const playerHpBefore = war.units.find((unit) => unit.id === setup.attacker.id).hp;
+  const enemyHpBefore = war.rivalUnits.find((unit) => unit.id === setup.enemyId).hp;
+  const after = advanceRivalMilitaryPhase(war, "brazil");
+  const player = after.units.find((unit) => unit.id === setup.attacker.id);
+  const enemy = after.rivalUnits.find((unit) => unit.id === setup.enemyId);
+
+  assert.ok(!player || player.hp < playerHpBefore);
+  assert.ok(!enemy || enemy.hp < enemyHpBefore);
+  if (enemy) assert.equal(enemy.moves, 0);
+  assert.match(after.message, /巴西军队/);
+});
+
+test("AI production accumulates yields and spawns a persistent warrior", () => {
+  const initial = createInitialState();
+  const beforeCount = initial.rivalUnits.filter((unit) => unit.rivalId === "brazil").length;
+  const ready = {
+    ...initial,
+    rivalMilitaryProgress: { ...initial.rivalMilitaryProgress, brazil: RIVAL_UNIT_COST - 1 },
+  };
+  const after = advanceRivalProduction(ready, "brazil");
+  const brazilUnits = after.rivalUnits.filter((unit) => unit.rivalId === "brazil");
+
+  assert.equal(brazilUnits.length, beforeCount + 1);
+  assert.ok(after.rivalMilitaryProgress.brazil < RIVAL_UNIT_COST);
+  assert.equal(after.nextRivalUnitSerial, initial.nextRivalUnitSerial + 1);
+  assert.equal(brazilUnits.at(-1).hp, UNIT_MAX_HP);
+  assert.equal(brazilUnits.at(-1).moves, 0);
 });
 
 test("AI development pushes an exact one-tile border without overlaps", () => {
