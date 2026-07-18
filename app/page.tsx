@@ -46,13 +46,13 @@ const TERRAIN: Terrain[] = [
   "water", "plains", "forest", "water", "hills", "grass", "water", "plains", "forest",
 ];
 
-const TERRAIN_INFO: Record<Terrain, { label: string; icon: string; food: number; production: number; gold: number }> = {
-  water: { label: "浅海", icon: "≈", food: 1, production: 0, gold: 2 },
-  plains: { label: "平原", icon: "✦", food: 1, production: 2, gold: 0 },
-  forest: { label: "森林", icon: "♠", food: 1, production: 2, gold: 1 },
-  hills: { label: "丘陵", icon: "◢", food: 0, production: 3, gold: 1 },
-  grass: { label: "潘帕斯草原", icon: "♧", food: 3, production: 1, gold: 0 },
-  mountain: { label: "山脉", icon: "▲", food: 0, production: 1, gold: 0 },
+const TERRAIN_INFO: Record<Terrain, { label: string; icon: string; food: number; production: number; science: number; culture: number; gold: number }> = {
+  water: { label: "浅海", icon: "≈", food: 1, production: 0, science: 1, culture: 0, gold: 2 },
+  plains: { label: "平原", icon: "✦", food: 1, production: 2, science: 0, culture: 0, gold: 0 },
+  forest: { label: "森林", icon: "♠", food: 1, production: 2, science: 0, culture: 1, gold: 1 },
+  hills: { label: "丘陵", icon: "◢", food: 0, production: 3, science: 1, culture: 0, gold: 1 },
+  grass: { label: "潘帕斯草原", icon: "♧", food: 3, production: 1, science: 0, culture: 1, gold: 0 },
+  mountain: { label: "山脉", icon: "▲", food: 0, production: 1, science: 2, culture: 0, gold: 0 },
 };
 
 const TECHS: Array<{ id: TechId; name: string; cost: number; icon: string; effect: string }> = [
@@ -146,6 +146,7 @@ export default function Home() {
   const [game, setGame] = useState<GameState>(createInitialState);
   const [techPickerOpen, setTechPickerOpen] = useState(false);
   const [aiThinking, setAiThinking] = useState(false);
+  const [showYields, setShowYields] = useState(true);
   const aiLockRef = useRef(false);
   const aiTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -154,7 +155,21 @@ export default function Home() {
     ? { col: Number(game.selectedTile.split("-")[0]), row: Number(game.selectedTile.split("-")[1]) }
     : game.unitPos;
   const selectedTerrain = terrainAt(selectedPos);
-  const selectedYield = TERRAIN_INFO[selectedTerrain];
+  const yieldsFor = (pos: Position) => {
+    const terrain = terrainAt(pos);
+    const base = TERRAIN_INFO[terrain];
+    const owned = isArgentineTerritory(pos);
+    const footballBonus = game.footballTurns > 0 && owned ? 1 : 0;
+    const husbandryBonus = owned && terrain === "grass" && game.completedTechs.includes("husbandry") ? 1 : 0;
+    const argentinaCulture = owned && terrain === "grass" ? 1 : 0;
+    return {
+      ...base,
+      food: base.food + footballBonus + husbandryBonus,
+      science: base.science + footballBonus,
+      culture: base.culture + argentinaCulture,
+    };
+  };
+  const selectedYield = yieldsFor(selectedPos);
   const maxMoves = 2 + (game.completedTechs.includes("riding") ? 1 : 0) + (game.footballTurns > 0 ? 1 : 0);
   const revealedCount = game.discovered.size;
   const objectives = [
@@ -403,15 +418,24 @@ export default function Home() {
 
           <section className="paper-card legend-card">
             <div className="card-kicker">{selectedYield.label}收益</div>
-            <div><span>● 食物</span><b>{selectedYield.food + (game.footballTurns > 0 && isArgentineTerritory(selectedPos) ? 1 : 0)}</b></div>
-            <div><span>◆ 生产</span><b>{selectedYield.production}</b></div>
-            <div><span>● 金币</span><b>{selectedYield.gold + (game.footballTurns > 0 && isArgentineTerritory(selectedPos) ? 1 : 0)}</b></div>
+            <div><span><i className="yield-dot food">粮</i>食物</span><b>{selectedYield.food}</b></div>
+            <div><span><i className="yield-dot production">锤</i>生产</span><b>{selectedYield.production}</b></div>
+            <div><span><i className="yield-dot science">科</i>科技</span><b>{selectedYield.science}</b></div>
+            <div><span><i className="yield-dot culture">文</i>文化</span><b>{selectedYield.culture}</b></div>
           </section>
         </aside>
 
         <section className="map-stage" aria-label="世界地图">
           <div className="map-wash map-wash-one" />
           <div className="map-wash map-wash-two" />
+          <div className="yield-controls" aria-label="地块收益图例">
+            <div className="yield-legend" aria-hidden="true">
+              <span className="food">粮</span><span className="production">锤</span><span className="science">科</span><span className="culture">文</span>
+            </div>
+            <button className={showYields ? "active" : ""} aria-pressed={showYields} onClick={() => setShowYields((value) => !value)} data-testid="yield-toggle">
+              {showYields ? "隐藏收益" : "显示收益"}
+            </button>
+          </div>
           <div className="hex-board" role="grid" aria-label="潘帕斯六角格地图">
             {tiles.map(({ terrain, col, row }) => {
               const pos = { col, row };
@@ -422,20 +446,30 @@ export default function Home() {
               const selected = game.selectedTile === tileId;
               const owned = isArgentineTerritory(pos);
               const rival = isBrazilianTerritory(pos);
+              const tileYield = yieldsFor(pos);
               const containsUnit = tileId === idFor(game.unitPos) ? "，高乔侦骑在此" : tileId === idFor(game.brazilPos) ? "，巴西斥候在此" : "";
+              const yieldLabel = discovered ? `，粮食 ${tileYield.food}，生产 ${tileYield.production}，科技 ${tileYield.science}，文化 ${tileYield.culture}` : "";
               return (
                 <button
                   className={`hex-tile ${terrain} ${owned ? "owned" : ""} ${rival ? "rival" : ""} ${discovered ? "" : "fog"} ${reachable ? "reachable" : ""} ${selected ? "selected" : ""} ${game.footballTurns > 0 && owned ? "football-benefit" : ""}`}
                   key={tileId}
                   style={{ left: col * 70, top: row * 82 + (col % 2) * 41 }}
-                  aria-label={`${discovered ? info.label : "未知"}地块，第 ${row + 1} 行第 ${col + 1} 列${containsUnit}${reachable ? "，可以移动" : ""}`}
+                  aria-label={`${discovered ? info.label : "未知"}地块，第 ${row + 1} 行第 ${col + 1} 列${yieldLabel}${containsUnit}${reachable ? "，可以移动" : ""}`}
                   aria-selected={selected}
                   role="gridcell"
                   data-testid={`tile-${tileId}`}
                   onClick={() => handleTileClick(pos)}
                   disabled={aiThinking || Boolean(game.result)}
                 >
-                  <span aria-hidden="true">{discovered ? info.icon : "?"}</span>
+                  <span className="terrain-glyph" aria-hidden="true">{discovered ? info.icon : "?"}</span>
+                  {showYields && discovered && (
+                    <span className="tile-yields" aria-hidden="true">
+                      {tileYield.food > 0 && <i className="food">粮<b>{tileYield.food}</b></i>}
+                      {tileYield.production > 0 && <i className="production">锤<b>{tileYield.production}</b></i>}
+                      {tileYield.science > 0 && <i className="science">科<b>{tileYield.science}</b></i>}
+                      {tileYield.culture > 0 && <i className="culture">文<b>{tileYield.culture}</b></i>}
+                    </span>
+                  )}
                 </button>
               );
             })}
