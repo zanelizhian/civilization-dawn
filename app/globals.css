@@ -2326,7 +2326,7 @@ button { font: inherit; }
 .leader-agenda > b { color: #d9bd67; font-size: 8px; white-space: nowrap; }
 
 .narrative-drawer { width: min(440px,40vw); position: fixed; inset: 56px 0 0 auto; z-index: 52; display: flex; flex-direction: column; overflow-y: auto; visibility: hidden; padding-bottom: 28px; color: #f6f0dc; border-left: 1px solid rgba(224,190,91,.58); background: radial-gradient(circle at 85% 4%,rgba(201,151,45,.22),transparent 34%),linear-gradient(180deg,#292d29,#151c1b 60%,#101715); box-shadow: -22px 0 60px rgba(8,14,13,.52); transform: translateX(102%); pointer-events: none; transition: transform 240ms cubic-bezier(.2,.8,.2,1),visibility 240ms; }
-.narrative-drawer::before { content:""; height: 4px; position: fixed; inset: 56px 0 auto auto; width: min(440px,40vw); background: linear-gradient(90deg,#826224,#f0d16d,#826224); }
+.narrative-drawer::before { content:""; height: 4px; position: absolute; z-index: 2; inset: 0 0 auto; pointer-events: none; background: linear-gradient(90deg,#826224,#f0d16d,#826224); }
 .narrative-drawer.open { visibility: visible; transform: translateX(0); pointer-events: auto; }
 .narrative-header { display: grid; grid-template-columns: 46px minmax(0,1fr); align-items: center; gap: 12px; padding: 24px 20px 16px; border-bottom: 1px solid rgba(230,202,113,.18); }
 .narrative-header > span { width: 44px; height: 44px; display: grid; place-items: center; border: 1px solid #dfc46d; border-radius: 50%; color: #f5d66d; background: rgba(218,178,65,.1); font-size: 22px; }
@@ -2346,7 +2346,6 @@ button { font: inherit; }
 
 @media (max-width: 920px) {
   .narrative-drawer { width: min(440px,88vw); top: 112px; }
-  .narrative-drawer::before { top: 112px; width: min(440px,88vw); }
 }
 @media (max-width: 620px) {
   .map-focus-controls select { max-width: 90px; }
@@ -2359,7 +2358,6 @@ button { font: inherit; }
   .ai-turn-progress { gap: 4px; padding: 6px; }
   .ai-turn-dot { width: 6px; height: 6px; }
   .narrative-drawer { width: 100%; max-height: 76dvh; inset: auto 0 0; border-top: 1px solid rgba(224,190,91,.58); border-left: 0; transform: translateY(102%); }
-  .narrative-drawer::before { width: 100%; inset: auto 0 calc(76dvh - 4px); }
   .narrative-drawer.open { transform: translateY(0); }
   .narrative-header { padding: 14px; }.narrative-header h2 { font-size: 19px; }.narrative-illustration { min-height: 95px; }
   .narrative-copy { padding: 11px 14px 7px; }.narrative-choices { padding-inline: 12px; }.narrative-choices button { min-height: 61px; }
