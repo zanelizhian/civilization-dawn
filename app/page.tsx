@@ -6,6 +6,7 @@ import type { CSSProperties } from "react";
 type Terrain = "water" | "desert" | "forest" | "hills" | "grass" | "mountain";
 type Position = { col: number; row: number };
 type TechId = "husbandry" | "riding" | "federalism" | "broadcast";
+type ProductionId = "monument" | "granary" | "academy" | "workshop";
 type ImprovementType = "palace" | "ranch" | "farm";
 
 type GameState = {
@@ -19,6 +20,9 @@ type GameState = {
   activeTech: TechId | null;
   techProgress: number;
   completedTechs: TechId[];
+  activeProduction: ProductionId | null;
+  productionProgress: Record<ProductionId, number>;
+  completedBuildings: ProductionId[];
   unitPos: Position;
   unitMoves: number;
   brazilPos: Position;
@@ -67,6 +71,13 @@ const TECHS: Array<{ id: TechId; name: string; cost: number; icon: string; effec
   { id: "riding", name: "骑术传统", cost: 16, icon: "⚑", effect: "高乔侦骑移动力 +1" },
   { id: "federalism", name: "联邦制度", cost: 20, icon: "◈", effect: "首都每回合科研 +2" },
   { id: "broadcast", name: "大众广播", cost: 24, icon: "◉", effect: "每回合伟人点 +2" },
+];
+
+const PRODUCTIONS: Array<{ id: ProductionId; name: string; cost: number; icon: string; effect: string; category: string }> = [
+  { id: "monument", name: "五月纪念碑", cost: 14, icon: "✦", effect: "每回合文化 +2", category: "城市建筑" },
+  { id: "granary", name: "潘帕斯粮仓", cost: 21, icon: "♨", effect: "每回合食物 +2", category: "城市建筑" },
+  { id: "academy", name: "国立学院", cost: 28, icon: "◆", effect: "每回合科技 +2", category: "城市建筑" },
+  { id: "workshop", name: "布宜诺斯工坊", cost: 32, icon: "⚒", effect: "首都每回合生产力 +2", category: "城市建筑" },
 ];
 
 const idFor = ({ col, row }: Position) => `${col}-${row}`;
@@ -135,6 +146,21 @@ function initialDiscovered() {
   return set;
 }
 
+function tileProductionFor(pos: Position) {
+  const terrain = TERRAIN_INFO[terrainAt(pos)];
+  const improvement = IMPROVEMENTS[idFor(pos)];
+  return terrain.production + (improvement?.bonus.production ?? 0);
+}
+
+function cityProductionFor(state: GameState) {
+  const workable = [CITY_POS, ...neighbors(CITY_POS)]
+    .filter((pos) => state.discovered.has(idFor(pos)) && isArgentineTerritory(pos))
+    .map(tileProductionFor)
+    .sort((a, b) => b - a);
+  const workedTileProduction = workable.slice(0, Math.max(1, state.population)).reduce((total, value) => total + value, 0);
+  return Math.max(1, workedTileProduction) + (state.completedBuildings.includes("workshop") ? 2 : 0);
+}
+
 function createInitialState(): GameState {
   return {
     turn: 1,
@@ -147,6 +173,9 @@ function createInitialState(): GameState {
     activeTech: "husbandry",
     techProgress: 0,
     completedTechs: [],
+    activeProduction: null,
+    productionProgress: { monument: 0, granary: 0, academy: 0, workshop: 0 },
+    completedBuildings: [],
     unitPos: { col: 6, row: 3 },
     unitMoves: 2,
     brazilPos: { col: 7, row: 1 },
@@ -174,12 +203,22 @@ function nextBrazilPosition(state: GameState) {
 export default function Home() {
   const [game, setGame] = useState<GameState>(createInitialState);
   const [techPickerOpen, setTechPickerOpen] = useState(false);
+  const [productionPickerOpen, setProductionPickerOpen] = useState(false);
+  const [productionReminderBypassed, setProductionReminderBypassed] = useState(false);
   const [aiThinking, setAiThinking] = useState(false);
   const [showYields, setShowYields] = useState(false);
   const aiLockRef = useRef(false);
   const aiTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const activeTech = TECHS.find((tech) => tech.id === game.activeTech) ?? null;
+  const activeProduction = PRODUCTIONS.find((item) => item.id === game.activeProduction) ?? null;
+  const productionPerTurn = cityProductionFor(game);
+  const activeProductionProgress = activeProduction ? game.productionProgress[activeProduction.id] : 0;
+  const productionTurnsRemaining = activeProduction
+    ? Math.max(1, Math.ceil((activeProduction.cost - activeProductionProgress) / productionPerTurn))
+    : null;
+  const hasAvailableProduction = game.completedBuildings.length < PRODUCTIONS.length;
+  const citySelected = !game.selectedUnit && game.selectedTile === idFor(CITY_POS);
   const selectedPos = game.selectedTile
     ? { col: Number(game.selectedTile.split("-")[0]), row: Number(game.selectedTile.split("-")[1]) }
     : game.unitPos;
@@ -206,7 +245,7 @@ export default function Home() {
   const movementCosts = useMemo(() => {
     if (!game.selectedUnit || game.unitMoves <= 0) return new Map<string, number>();
     return movementRange(game.unitPos, game.unitMoves, new Set([idFor(game.brazilPos)]));
-  }, [game.selectedUnit, game.unitMoves, game.unitPos.col, game.unitPos.row, game.brazilPos.col, game.brazilPos.row]);
+  }, [game.selectedUnit, game.unitMoves, game.unitPos, game.brazilPos]);
   const revealedCount = game.discovered.size;
   const objectives = [
     { label: "首都达到 5 人口", value: game.population, target: 5, done: game.population >= 5 },
@@ -217,8 +256,26 @@ export default function Home() {
 
   const addLog = (log: string[], entry: string) => [entry, ...log].slice(0, 4);
 
+  const openCapitalProduction = () => {
+    if (aiThinking || game.result) return;
+    setGame((prev) => ({
+      ...prev,
+      selectedTile: idFor(CITY_POS),
+      selectedUnit: false,
+      message: prev.activeProduction
+        ? `布宜诺斯艾利斯正在建造${PRODUCTIONS.find((item) => item.id === prev.activeProduction)?.name}。`
+        : "请为布宜诺斯艾利斯安排一个生产项目。",
+    }));
+    setTechPickerOpen(false);
+    setProductionPickerOpen(true);
+  };
+
   const handleTileClick = (pos: Position) => {
     if (aiThinking || game.result) return;
+    if (idFor(pos) === idFor(CITY_POS) && !game.selectedUnit) {
+      openCapitalProduction();
+      return;
+    }
     setGame((prev) => {
       const tileId = idFor(pos);
       const terrain = terrainAt(pos);
@@ -246,6 +303,7 @@ export default function Home() {
       return {
         ...prev,
         selectedTile: tileId,
+        selectedUnit: false,
         message: blocked ? `${TERRAIN_INFO[terrain].label}目前无法通行。` : `已查看${TERRAIN_INFO[terrain].label}地块。`,
       };
     });
@@ -282,6 +340,21 @@ export default function Home() {
     setTechPickerOpen(false);
   };
 
+  const chooseProduction = (productionId: ProductionId) => {
+    const item = PRODUCTIONS.find((production) => production.id === productionId);
+    if (!item || aiThinking || game.result || game.completedBuildings.includes(productionId)) return;
+    setGame((prev) => ({
+      ...prev,
+      activeProduction: productionId,
+      selectedTile: idFor(CITY_POS),
+      selectedUnit: false,
+      message: `${prev.activeProduction && prev.activeProduction !== productionId ? "已切换为" : "开始建造"}${item.name}，已有进度会保留。`,
+      log: addLog(prev.log, `布宜诺斯艾利斯开始建造${item.name}。`),
+    }));
+    setProductionReminderBypassed(false);
+    setProductionPickerOpen(false);
+  };
+
   const recruitMessi = () => {
     if (game.greatPoints < 30 || game.messiRecruited || aiThinking || game.result) return;
     setGame((prev) => ({
@@ -316,10 +389,11 @@ export default function Home() {
 
     aiTimerRef.current = setTimeout(() => {
       setGame((prev) => {
-        const scienceGain = 4 + prev.population + (prev.completedTechs.includes("federalism") ? 2 : 0) + (prev.footballTurns > 0 ? 2 : 0);
-        const cultureGain = 3 + (prev.messiRecruited ? 2 : 0) + (prev.footballTurns > 0 ? 2 : 0);
+        const scienceGain = 4 + prev.population + (prev.completedTechs.includes("federalism") ? 2 : 0) + (prev.completedBuildings.includes("academy") ? 2 : 0) + (prev.footballTurns > 0 ? 2 : 0);
+        const cultureGain = 3 + (prev.messiRecruited ? 2 : 0) + (prev.completedBuildings.includes("monument") ? 2 : 0) + (prev.footballTurns > 0 ? 2 : 0);
         const goldGain = 7 + (prev.footballTurns > 0 ? 3 : 0);
-        const foodGain = 4 + prev.population + (prev.completedTechs.includes("husbandry") ? 1 : 0) + (prev.footballTurns > 0 ? 2 : 0);
+        const foodGain = 4 + prev.population + (prev.completedTechs.includes("husbandry") ? 1 : 0) + (prev.completedBuildings.includes("granary") ? 2 : 0) + (prev.footballTurns > 0 ? 2 : 0);
+        const productionGain = cityProductionFor(prev);
         let food = prev.food + foodGain;
         let population = prev.population;
         let grew = false;
@@ -344,6 +418,20 @@ export default function Home() {
           }
         }
 
+        const productionProgress = { ...prev.productionProgress };
+        const completedBuildings = [...prev.completedBuildings];
+        let activeProductionId = prev.activeProduction;
+        let completedProduction: (typeof PRODUCTIONS)[number] | null = null;
+        if (activeProductionId) {
+          const production = PRODUCTIONS.find((item) => item.id === activeProductionId)!;
+          productionProgress[activeProductionId] = Math.min(production.cost, productionProgress[activeProductionId] + productionGain);
+          if (productionProgress[activeProductionId] >= production.cost) {
+            if (!completedBuildings.includes(activeProductionId)) completedBuildings.push(activeProductionId);
+            completedProduction = production;
+            activeProductionId = null;
+          }
+        }
+
         const footballTurns = Math.max(0, prev.footballTurns - 1);
         const greatPointGain = 3 + Math.floor(population / 2) + (completedTechs.includes("broadcast") ? 2 : 0);
         const brazilInfluence = prev.brazilInfluence + 4 + (grew ? 1 : 0);
@@ -352,11 +440,11 @@ export default function Home() {
         const recruited = prev.messiRecruited;
         const won = population >= 5 && completedTechs.length >= 2 && prev.discovered.size >= 26 && recruited;
         const lost = brazilInfluence >= 100;
-        const summary = completedName
-          ? `完成科技：${completedName}。请选择下一项研究。`
-          : grew
-            ? `布宜诺斯艾利斯增长到 ${population} 人口！`
-            : `第 ${nextTurn} 回合开始，高乔侦骑恢复行动。`;
+        const turnEvents: string[] = [];
+        if (completedProduction) turnEvents.push(`布宜诺斯艾利斯完成了${completedProduction.name}：${completedProduction.effect}。`);
+        if (completedName) turnEvents.push(`完成科技：${completedName}。请选择下一项研究。`);
+        if (grew) turnEvents.push(`布宜诺斯艾利斯增长到 ${population} 人口！`);
+        const summary = turnEvents.length ? turnEvents.join(" ") : `第 ${nextTurn} 回合开始，高乔侦骑恢复行动。`;
 
         return {
           ...prev,
@@ -370,6 +458,9 @@ export default function Home() {
           activeTech: activeTechId,
           techProgress,
           completedTechs,
+          activeProduction: activeProductionId,
+          productionProgress,
+          completedBuildings,
           unitMoves: nextMoves,
           brazilPos: nextBrazilPosition(prev),
           brazilInfluence,
@@ -384,22 +475,55 @@ export default function Home() {
     }, 650);
   }, [game.result]);
 
+  const requestEndTurn = useCallback(() => {
+    if (aiThinking || game.result || techPickerOpen || productionPickerOpen) return;
+    if (!game.activeProduction && game.completedBuildings.length < PRODUCTIONS.length && !productionReminderBypassed) {
+      setGame((prev) => ({
+        ...prev,
+        selectedTile: idFor(CITY_POS),
+        selectedUnit: false,
+        message: "请先为布宜诺斯艾利斯安排生产，或选择本回合暂不生产。",
+      }));
+      setProductionPickerOpen(true);
+      return;
+    }
+    setProductionReminderBypassed(false);
+    endTurn();
+  }, [aiThinking, endTurn, game.activeProduction, game.completedBuildings.length, game.result, productionPickerOpen, productionReminderBypassed, techPickerOpen]);
+
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       const target = event.target as HTMLElement;
-      if (event.key === "Enter" && !["BUTTON", "INPUT", "SELECT", "TEXTAREA"].includes(target.tagName)) endTurn();
-      if (event.key === "Escape") setTechPickerOpen(false);
+      if (event.key === "Enter" && !["BUTTON", "INPUT", "SELECT", "TEXTAREA"].includes(target.tagName)) requestEndTurn();
+      if (event.key === "Escape") {
+        setTechPickerOpen(false);
+        setProductionPickerOpen(false);
+      }
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [endTurn]);
+  }, [requestEndTurn]);
 
   useEffect(() => () => {
     if (aiTimerRef.current) clearTimeout(aiTimerRef.current);
   }, []);
 
+  const resetGame = () => {
+    if (aiTimerRef.current) clearTimeout(aiTimerRef.current);
+    aiTimerRef.current = null;
+    aiLockRef.current = false;
+    setAiThinking(false);
+    setTechPickerOpen(false);
+    setProductionPickerOpen(false);
+    setProductionReminderBypassed(false);
+    setGame(createInitialState());
+  };
+
   const techPercent = activeTech ? Math.min(100, (game.techProgress / activeTech.cost) * 100) : 0;
+  const productionPercent = activeProduction ? Math.min(100, activeProductionProgress / activeProduction.cost * 100) : 0;
   const cityGrowthTarget = 10 + game.population * 4;
+  const sciencePerTurn = 4 + game.population + (game.completedTechs.includes("federalism") ? 2 : 0) + (game.completedBuildings.includes("academy") ? 2 : 0) + (game.footballTurns > 0 ? 2 : 0);
+  const culturePerTurn = 3 + (game.messiRecruited ? 2 : 0) + (game.completedBuildings.includes("monument") ? 2 : 0) + (game.footballTurns > 0 ? 2 : 0);
   const cityTileLeft = CITY_POS.col * 70;
   const cityTileTop = CITY_POS.row * 82 + (CITY_POS.col % 2) * 41;
   const cityStyle = { left: cityTileLeft - 39, top: cityTileTop + 57 };
@@ -419,8 +543,8 @@ export default function Home() {
         </div>
         <div className="resource-strip" aria-label="文明资源">
           <span><b className="gold">●</b><small>金币</small><strong>{game.gold}</strong><em>+7</em></span>
-          <span><b className="science">◆</b><small>科技</small><strong>{game.science}</strong><em>+{4 + game.population}</em></span>
-          <span><b className="culture">✦</b><small>文化</small><strong>{game.culture}</strong><em>+{3 + (game.messiRecruited ? 2 : 0)}</em></span>
+          <span><b className="science">◆</b><small>科技</small><strong>{game.science}</strong><em>+{sciencePerTurn}</em></span>
+          <span><b className="culture">✦</b><small>文化</small><strong>{game.culture}</strong><em>+{culturePerTurn}</em></span>
           <span><b className="people">★</b><small>伟人</small><strong>{game.greatPoints}</strong><em>/ 30</em></span>
         </div>
         <div className="turn-indicator"><small>探索时代</small><strong>回合 {game.turn}</strong></div>
@@ -529,8 +653,8 @@ export default function Home() {
               );
             })}
 
-            <button className="map-piece capital-piece" style={cityStyle} aria-label={`布宜诺斯艾利斯，阿根廷首都，${game.population} 人口，建有首都宫殿`} onClick={() => setGame((prev) => ({ ...prev, selectedTile: idFor(CITY_POS), selectedUnit: false, message: "已选择布宜诺斯艾利斯的首都宫殿。" }))}>
-              <span className="place-label"><b>★</b> 布宜诺斯艾利斯 <em>{game.population}</em></span>
+            <button className={`map-piece capital-piece ${citySelected ? "capital-selected" : ""}`} style={cityStyle} aria-label={`布宜诺斯艾利斯，阿根廷首都，${game.population} 人口，${activeProduction ? `正在建造${activeProduction.name}，还需 ${productionTurnsRemaining} 回合` : "等待安排生产"}`} onClick={openCapitalProduction} data-testid="capital-city">
+              <span className="place-label"><b>★</b> 布宜诺斯艾利斯 <em>{game.population}</em><small className={activeProduction ? "building" : "idle"}>锤 {activeProduction ? `${activeProduction.name} · ${productionTurnsRemaining}` : "待生产"}</small></span>
             </button>
 
             <button className={`map-piece unit-piece gaucho-piece ${game.selectedUnit ? "piece-selected" : ""}`} style={unitStyle} aria-label={`高乔侦骑，${game.unitMoves} 点移动力`} data-testid="gaucho-unit" onClick={() => setGame((prev) => ({ ...prev, selectedUnit: true, selectedTile: idFor(prev.unitPos), message: "高乔侦骑已选择；绿色落点是本回合可达范围。" }))}>
@@ -567,6 +691,12 @@ export default function Home() {
             <div className="trait"><span>太阳五月</span><b>草原文化 +1</b></div>
             <div className="trait"><span>潘帕斯牧场</span><b>骑乘单位 +1 移动</b></div>
             <div className="city-growth"><span>首都成长</span><b>{game.food}/{cityGrowthTarget} 食物</b><i><em style={{ width: `${Math.min(100, game.food / cityGrowthTarget * 100)}%` }} /></i></div>
+            <button className={`city-production-summary ${activeProduction ? "active" : "idle"}`} onClick={openCapitalProduction} disabled={aiThinking || Boolean(game.result)} data-testid="open-production-picker">
+              <span className="production-summary-icon" aria-hidden="true">⚒</span>
+              <span className="production-summary-copy"><small>首都生产 · +{productionPerTurn} 锤/回合</small><strong>{activeProduction?.name ?? (hasAvailableProduction ? "待安排生产" : "全部项目已完成")}</strong>{activeProduction && <i><em style={{ width: `${productionPercent}%` }} /></i>}</span>
+              <b>{activeProduction ? `${productionTurnsRemaining} 回合` : hasAvailableProduction ? "安排 ›" : "完成 ✓"}</b>
+            </button>
+            {game.completedBuildings.length > 0 && <div className="completed-buildings" aria-label="已建成建筑">{game.completedBuildings.map((id) => <span key={id}>{PRODUCTIONS.find((item) => item.id === id)?.name}</span>)}</div>}
           </section>
 
           <section className="paper-card world-card">
@@ -598,20 +728,27 @@ export default function Home() {
         </aside>
       </section>
 
-      <div className="action-dock" role="region" aria-label="选中单位操作">
+      <div className={`action-dock ${citySelected ? "city-mode" : ""}`} role="region" aria-label={citySelected ? "首都生产操作" : "选中单位操作"}>
         <div className="selected-unit">
-          <span className="unit-portrait" aria-hidden="true">{game.selectedUnit ? "高" : "⌖"}</span>
-          <div className="selected-copy"><small>{game.selectedUnit ? "● 单位已选择" : "等待命令"}</small><strong>{game.selectedUnit ? "高乔侦骑" : "选择一个单位"}</strong>{game.selectedUnit && <span className="movement-pips" aria-label={`${game.unitMoves} / ${maxMoves} 移动力`}>{Array.from({ length: maxMoves }, (_, index) => <i className={index < game.unitMoves ? "available" : "spent"} key={index} />)}<b>{game.unitMoves}/{maxMoves}</b></span>}<span>{game.selectedUnit ? game.unitMoves > 0 ? "选择绿色落点移动" : "本回合移动力已用完" : "点击地图上的单位"}</span></div>
+          <span className="unit-portrait" aria-hidden="true">{game.selectedUnit ? "高" : citySelected ? "★" : "⌖"}</span>
+          <div className="selected-copy"><small>{game.selectedUnit ? "● 单位已选择" : citySelected ? "● 首都已选择" : "当前地块"}</small><strong>{game.selectedUnit ? "高乔侦骑" : citySelected ? "布宜诺斯艾利斯" : selectedImprovement?.name ?? selectedYield.label}</strong>{game.selectedUnit && <span className="movement-pips" aria-label={`${game.unitMoves} / ${maxMoves} 移动力`}>{Array.from({ length: maxMoves }, (_, index) => <i className={index < game.unitMoves ? "available" : "spent"} key={index} />)}<b>{game.unitMoves}/{maxMoves}</b></span>}<span>{game.selectedUnit ? game.unitMoves > 0 ? "选择绿色落点移动" : "本回合移动力已用完" : citySelected ? `人口 ${game.population} · +${productionPerTurn} 锤/回合` : "点击单位或首都下达命令"}</span></div>
         </div>
-        <div className="action-buttons">
-          <button disabled={!game.selectedUnit || game.unitMoves <= 0 || aiThinking} onClick={() => setGame((prev) => ({ ...prev, message: "请选择带白色落点的绿色地块；数字表示需要的移动力。" }))}><b>⌖</b><span>移动</span></button>
-          <button disabled={!game.selectedUnit || game.unitMoves <= 0 || aiThinking} onClick={handleExplore} data-testid="explore-action"><b>◉</b><span>侦察</span></button>
-          <button disabled={!game.selectedUnit || game.unitMoves <= 0 || aiThinking} onClick={handleWait}><b>⚑</b><span>驻扎</span></button>
-          <button disabled={!game.selectedUnit || game.unitMoves <= 0 || aiThinking} onClick={handleWait}><b>↶</b><span>休整</span></button>
-        </div>
+        {citySelected ? (
+          <div className="city-production-dock">
+            <div className="dock-production-copy"><small>当前生产</small><strong>{activeProduction?.name ?? (hasAvailableProduction ? "尚未安排生产" : "全部建筑已完成")}</strong><span>{activeProduction ? `${activeProductionProgress}/${activeProduction.cost} 锤 · 预计 ${productionTurnsRemaining} 回合` : hasAvailableProduction ? "选择一个项目开始建设" : "布宜诺斯艾利斯已建设完毕"}</span>{activeProduction && <i><em style={{ width: `${productionPercent}%` }} /></i>}</div>
+            <button onClick={openCapitalProduction} disabled={aiThinking || !hasAvailableProduction} data-testid="dock-production-button"><b>⚒</b><span>{activeProduction ? "更换生产" : hasAvailableProduction ? "选择生产" : "建设完成"}</span></button>
+          </div>
+        ) : (
+          <div className="action-buttons">
+            <button disabled={!game.selectedUnit || game.unitMoves <= 0 || aiThinking} onClick={() => setGame((prev) => ({ ...prev, message: "请选择带白色落点的绿色地块；数字表示需要的移动力。" }))}><b>⌖</b><span>移动</span></button>
+            <button disabled={!game.selectedUnit || game.unitMoves <= 0 || aiThinking} onClick={handleExplore} data-testid="explore-action"><b>◉</b><span>侦察</span></button>
+            <button disabled={!game.selectedUnit || game.unitMoves <= 0 || aiThinking} onClick={handleWait}><b>⚑</b><span>驻扎</span></button>
+            <button disabled={!game.selectedUnit || game.unitMoves <= 0 || aiThinking} onClick={handleWait}><b>↶</b><span>休整</span></button>
+          </div>
+        )}
       </div>
 
-      <button className="end-turn-button" onClick={endTurn} disabled={aiThinking || Boolean(game.result)} data-testid="end-turn"><span>{aiThinking ? "巴西行动中" : "结束回合"}</span><small>Enter</small></button>
+      <button className="end-turn-button" onClick={requestEndTurn} disabled={aiThinking || Boolean(game.result)} data-testid="end-turn"><span>{aiThinking ? "巴西行动中" : "结束回合"}</span><small>Enter</small></button>
 
       <div className="event-toast" role="status" aria-live="polite">{game.message}</div>
 
@@ -630,6 +767,24 @@ export default function Home() {
         </div>
       )}
 
+      {productionPickerOpen && (
+        <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && setProductionPickerOpen(false)}>
+          <section className="tech-modal production-modal" role="dialog" aria-modal="true" aria-labelledby="production-title">
+            <div className="modal-header"><div><span>城市生产</span><h2 id="production-title">布宜诺斯艾利斯建造什么？</h2><p>当前产出：每回合 +{productionPerTurn} 锤。切换项目会保留各自进度。</p></div><button onClick={() => setProductionPickerOpen(false)} aria-label="关闭生产列表">×</button></div>
+            <div className="tech-grid production-grid">
+              {PRODUCTIONS.map((production) => {
+                const done = game.completedBuildings.includes(production.id);
+                const active = game.activeProduction === production.id;
+                const progress = game.productionProgress[production.id];
+                const turns = Math.max(1, Math.ceil((production.cost - progress) / productionPerTurn));
+                return <button key={production.id} disabled={done} className={active ? "active" : ""} onClick={() => chooseProduction(production.id)} data-testid={`production-${production.id}`}><span>{production.icon}</span><div><em>{production.category}</em><h3>{production.name}</h3><p>{production.effect}</p><small>{done ? "已建成" : active ? `${progress}/${production.cost} 锤 · 还需 ${turns} 回合` : `${production.cost} 锤 · 预计 ${turns} 回合`}</small>{progress > 0 && !done && <i><b style={{ width: `${Math.min(100, progress / production.cost * 100)}%` }} /></i>}</div></button>;
+              })}
+            </div>
+            <button className="production-skip" onClick={() => { setProductionReminderBypassed(true); setProductionPickerOpen(false); setGame((prev) => ({ ...prev, message: "本回合暂不生产；再次点击结束回合即可继续。" })); }}>本回合暂不生产</button>
+          </section>
+        </div>
+      )}
+
       {game.result && (
         <div className="modal-backdrop result-backdrop">
           <section className="result-modal" role="dialog" aria-modal="true" aria-labelledby="result-title">
@@ -637,7 +792,7 @@ export default function Home() {
             <div className="card-kicker">{game.result === "win" ? "历史性胜利" : "时代落幕"}</div>
             <h2 id="result-title">{game.result === "win" ? "阿根廷迎来文明曙光" : "巴西赢得地区影响力"}</h2>
             <p>{game.result === "win" ? "布宜诺斯艾利斯繁荣昌盛，科技、探索与梅西凝聚了整个文明。" : "重新规划探索与科技节奏，再次带领阿根廷出发。"}</p>
-            <button onClick={() => { setGame(createInitialState()); aiLockRef.current = false; setAiThinking(false); }}>重新开始</button>
+            <button onClick={resetGame}>重新开始</button>
           </section>
         </div>
       )}
