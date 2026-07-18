@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties } from "react";
 
-type Terrain = "water" | "plains" | "forest" | "hills" | "grass" | "mountain";
+type Terrain = "water" | "desert" | "forest" | "hills" | "grass" | "mountain";
 type Position = { col: number; row: number };
 type TechId = "husbandry" | "riding" | "federalism" | "broadcast";
 
@@ -38,21 +38,21 @@ const ROWS = 6;
 const CITY_POS = { col: 4, row: 2 };
 
 const TERRAIN: Terrain[] = [
-  "water", "plains", "forest", "hills", "grass", "mountain", "water", "plains", "forest",
-  "plains", "forest", "grass", "grass", "hills", "forest", "mountain", "grass", "water",
-  "water", "grass", "forest", "plains", "grass", "hills", "grass", "forest", "plains",
-  "plains", "grass", "grass", "forest", "plains", "grass", "forest", "hills", "water",
-  "hills", "forest", "grass", "water", "grass", "plains", "forest", "grass", "mountain",
-  "water", "plains", "forest", "water", "hills", "grass", "water", "plains", "forest",
+  "water", "desert", "forest", "hills", "grass", "mountain", "water", "desert", "forest",
+  "desert", "forest", "grass", "grass", "hills", "forest", "mountain", "grass", "water",
+  "water", "grass", "forest", "desert", "grass", "hills", "grass", "forest", "desert",
+  "desert", "grass", "grass", "forest", "desert", "grass", "forest", "hills", "water",
+  "hills", "forest", "grass", "water", "grass", "desert", "forest", "grass", "mountain",
+  "water", "desert", "forest", "water", "hills", "grass", "water", "desert", "forest",
 ];
 
-const TERRAIN_INFO: Record<Terrain, { label: string; icon: string; food: number; production: number; science: number; culture: number; gold: number }> = {
-  water: { label: "浅海", icon: "≈", food: 1, production: 0, science: 1, culture: 0, gold: 2 },
-  plains: { label: "平原", icon: "✦", food: 1, production: 2, science: 0, culture: 0, gold: 0 },
-  forest: { label: "森林", icon: "♠", food: 1, production: 2, science: 0, culture: 1, gold: 1 },
-  hills: { label: "丘陵", icon: "◢", food: 0, production: 3, science: 1, culture: 0, gold: 1 },
-  grass: { label: "潘帕斯草原", icon: "♧", food: 3, production: 1, science: 0, culture: 1, gold: 0 },
-  mountain: { label: "山脉", icon: "▲", food: 0, production: 1, science: 2, culture: 0, gold: 0 },
+const TERRAIN_INFO: Record<Terrain, { label: string; food: number; production: number; science: number; culture: number; gold: number }> = {
+  water: { label: "浅海", food: 1, production: 0, science: 1, culture: 0, gold: 2 },
+  desert: { label: "沙漠", food: 0, production: 1, science: 1, culture: 0, gold: 1 },
+  forest: { label: "森林", food: 1, production: 2, science: 0, culture: 1, gold: 1 },
+  hills: { label: "丘陵", food: 0, production: 3, science: 1, culture: 0, gold: 1 },
+  grass: { label: "潘帕斯草原", food: 3, production: 1, science: 0, culture: 1, gold: 0 },
+  mountain: { label: "山脉", food: 0, production: 1, science: 2, culture: 0, gold: 0 },
 };
 
 const TECHS: Array<{ id: TechId; name: string; cost: number; icon: string; effect: string }> = [
@@ -146,7 +146,7 @@ export default function Home() {
   const [game, setGame] = useState<GameState>(createInitialState);
   const [techPickerOpen, setTechPickerOpen] = useState(false);
   const [aiThinking, setAiThinking] = useState(false);
-  const [showYields, setShowYields] = useState(true);
+  const [showYields, setShowYields] = useState(false);
   const aiLockRef = useRef(false);
   const aiTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -429,9 +429,7 @@ export default function Home() {
           <div className="map-wash map-wash-one" />
           <div className="map-wash map-wash-two" />
           <div className="yield-controls" aria-label="地块收益图例">
-            <div className="yield-legend" aria-hidden="true">
-              <span className="food">粮</span><span className="production">锤</span><span className="science">科</span><span className="culture">文</span>
-            </div>
+            {showYields && <div className="yield-legend" aria-hidden="true"><span className="food">粮</span><span className="production">锤</span><span className="science">科</span><span className="culture">文</span></div>}
             <button className={showYields ? "active" : ""} aria-pressed={showYields} onClick={() => setShowYields((value) => !value)} data-testid="yield-toggle">
               {showYields ? "隐藏收益" : "显示收益"}
             </button>
@@ -461,9 +459,13 @@ export default function Home() {
                   onClick={() => handleTileClick(pos)}
                   disabled={aiThinking || Boolean(game.result)}
                 >
-                  <span className="terrain-glyph" aria-hidden="true">{discovered ? info.icon : "?"}</span>
-                  {showYields && discovered && (
-                    <span className="tile-yields" aria-hidden="true">
+                  {discovered ? (
+                    <span className={`terrain-art art-${terrain}`} aria-hidden="true"><i /><i /><i /><i /></span>
+                  ) : (
+                    <span className="fog-mark" aria-hidden="true">?</span>
+                  )}
+                  {discovered && (
+                    <span className={`tile-yields ${showYields ? "visible" : ""}`} aria-hidden="true">
                       {tileYield.food > 0 && <i className="food">粮<b>{tileYield.food}</b></i>}
                       {tileYield.production > 0 && <i className="production">锤<b>{tileYield.production}</b></i>}
                       {tileYield.science > 0 && <i className="science">科<b>{tileYield.science}</b></i>}
